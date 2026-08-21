@@ -6,4 +6,8 @@ node_modules/
 *.log
 .env
 .env.*
+# wrangler's local secrets file — this is where `wrangler dev` wants the private key, and
+# it is the one local-secret filename the first cut of this list missed.
+.dev.vars
+.dev.vars.*
 .DS_Store

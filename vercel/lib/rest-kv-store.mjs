@@ -52,7 +52,13 @@ export function restKvStore(env) {
       // SET NX EX: atomic. `result` is "OK" when the key was created, null when it existed.
       const r = await cmd(env, ['SET', `replay:${messageId}`, '1', 'NX', 'EX',
         String(ttl || 600)]);
-      return r !== null;
+      // Redis answers 'OK' when it created the key and null when it already existed. Those
+      // are the ONLY two answers this means anything for, so anything else is treated as a
+      // failure rather than as "new" — a proxy returning some other 200 body must not be
+      // able to turn the replay guard off.
+      if (r === 'OK') return true;
+      if (r === null) return false;
+      throw new Error(`kv SET NX returned an unexpected result: ${JSON.stringify(r)}`);
     },
 
     async getAccount(did) {

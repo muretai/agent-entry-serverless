@@ -32,6 +32,12 @@ const REPLAY_TTL_S = 600;
  *  window the door believes it has. */
 const KV_MIN_TTL_S = 60;
 
+/** Hex SHA-256 via WebCrypto, which workerd provides natively. */
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function kvStore(kv) {
   if (!kv) {
     throw new Error(
@@ -40,7 +46,12 @@ export function kvStore(kv) {
   }
   return {
     async seenMessage(messageId, ttl) {
-      const key = `replay:${messageId}`;
+      // Workers KV rejects a key over 512 BYTES, and `messageId` comes from a stranger, so
+      // the raw id cannot be the key: a long one would throw and the door would answer a
+      // platform 500 instead of a protocol verdict. Hashing gives a fixed-length key and
+      // costs nothing — and it is a REPLAY guard, so a collision would only ever refuse a
+      // message, never admit one.
+      const key = `replay:${await sha256Hex(messageId)}`;
       const existing = await kv.get(key);
       if (existing !== null) return false;
       await kv.put(key, '1', {

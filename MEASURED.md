@@ -29,8 +29,8 @@ This settles the open question the core backlog recorded (T105): the concern was
 needed it anyway.
 
 The **full template** (`workers/`, with real Workers KV via wrangler's local KV) was then
-judged over HTTP by `tools/receptor_check.py --handshake` from the muretai core repo:
-**39/39, 0 failed** — the same verdict the Node, Python, and PHP implementations get.
+judged over HTTP by `node tests/check-live.mjs --handshake` (which ships in this repo):
+**40/40, 0 failed** — the same verdict the Node, Python, and PHP implementations get.
 
 Not measured: a deploy to Cloudflare's actual edge. Local workerd is the same engine, but
 it is not the same network, and a zone in front of it can still refuse agents — see the
@@ -38,24 +38,48 @@ Browser Integrity Check warning in the README.
 
 ## Vercel and Netlify — HANDLER EXECUTED, PLATFORM ROUTING REVIEWED
 
-Both platforms hand a function a Web `Request` and take a Web `Response`, so the code that
-actually answers a stranger — `shared/handler.mjs` plus a store adapter — is
-platform-independent by construction. That code was run over plain Node
-(`tests/serve-local.mjs`) against in-memory backends implementing the same surfaces the real
-services expose, and judged by the same checker:
+An earlier version of this file asserted that "both platforms hand a function a Web Request
+… platform-independent by construction". **That was wrong, and it caused a bug**, so it is
+worth stating plainly rather than quietly deleting.
+
+Vercel does not decide the calling convention by the platform; it decides it by INSPECTING
+THE EXPORT. Its launcher looks for `.fetch` or a named HTTP-method export and treats
+anything else callable as the classic `(req, res)` Node signature. The first cut here
+exported a bare function, so Vercel would have called it as `(req, res)`: `new
+URL(request.url)` throws on a bare path, the returned `Response` is discarded, and the
+invocation hangs. One of three advertised targets, dead on its first request.
+
+That is now a test, run against @vercel/node's own detection code rather than against the
+documentation:
+
+| probe | result |
+|---|---|
+| Vercel's launcher detects `vercel/api/entry.mjs` as a WEB handler | **yes** |
+| invoked the way Vercel invokes it, the card is served | **HTTP 200, valid did:key** |
+| the same test against the old bare-function export | **fails** (regression guard) |
+
+Run it with `node tests/check-vercel-shape.mjs`, or `npm test` for that plus the
+copy-drift check.
+
+Netlify was always correct: `export default async (req) => Response` IS the Functions v2
+signature.
+
+The code that actually answers a stranger — `lib/handler.mjs` plus a store adapter — was
+executed over plain Node (`tests/serve-local.mjs`) against in-memory backends implementing
+the same surfaces the real services expose, and judged by `tests/check-live.mjs`:
 
 | store adapter | verdict |
 |---|---|
-| `shared/blob-store.mjs` (Netlify Blobs surface) | **39/39, 0 failed** |
-| `shared/rest-kv-store.mjs` (Upstash/Vercel KV REST) | **39/39, 0 failed** |
+| `netlify/lib/blob-store.mjs` (Netlify Blobs surface) | **40/40, 0 failed** |
+| `vercel/lib/rest-kv-store.mjs` (Upstash/Vercel KV REST) | **40/40, 0 failed** |
 
-**Not executed:** `vercel.json` rewrites and Netlify's `config.path` export — the routing
-layer that decides which requests reach the handler at all — and the real network services
-behind either store. Neither CLI is installed here and both need an account. If you deploy
-one of these, run the checker against your URL and you will know in thirty seconds:
+**Still not executed:** `vercel.json` rewrites and Netlify's `config.path` export — the
+routing layer that decides which requests reach the handler at all — and the real network
+services behind either store. Neither CLI is installed here and both need an account. If you
+deploy one of these, run the checker against your URL and you will know in thirty seconds:
 
 ```bash
-python3 receptor_check.py --handshake https://your-deployment.example
+node tests/check-live.mjs --handshake https://your-deployment.example
 ```
 
 ## The replay rule is not equally strong on all three

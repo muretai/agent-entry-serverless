@@ -5,8 +5,8 @@
  * site root without a redirect file, so the door and its routes cannot drift apart.
  */
 import { getStore } from '@netlify/blobs';
-import { buildEntry, toWebHandler } from '../../../shared/handler.mjs';
-import { blobStore } from '../../../shared/blob-store.mjs';
+import { buildEntry, toWebHandler } from '../../lib/handler.mjs';
+import { blobStore } from '../../lib/blob-store.mjs';
 
 let ENTRY = null;
 export default toWebHandler(() => {

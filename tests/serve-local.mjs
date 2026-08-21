@@ -2,24 +2,26 @@
  * tests/serve-local.mjs — run the SHARED handler over plain Node, so it can be judged.
  *
  * Neither Vercel nor Netlify can be run here without their CLIs and an account, but the
- * code that actually answers a stranger is `shared/handler.mjs` plus a store — and that is
- * platform-independent by construction, because both platforms hand a function a Web
- * `Request` and take a Web `Response`. This harness supplies exactly that, so
- * `receptor_check.py` can judge the real handler.
+ * code that actually answers a stranger is `lib/handler.mjs` plus a store adapter, and this
+ * harness imports those from the template directories themselves — so the files under test
+ * are the files that deploy.
  *
  * WHAT THIS PROVES AND WHAT IT DOES NOT. It proves the handler and the store adapters obey
- * the contract. It does NOT exercise Vercel's `rewrites` or Netlify's `config.path` — the
- * routing layer that decides which requests reach the handler at all. Those are reviewed,
- * not executed, and that limit is stated in the repo README rather than glossed.
+ * the contract. It does NOT exercise Vercel's `rewrites`, Netlify's `config.path`, or
+ * Vercel's handler-shape detection — the routing layer that decides which requests reach the
+ * handler at all. Those are checked separately (see MEASURED.md) and the limit is stated
+ * there rather than glossed.
  *
  *     STORE=blob  node tests/serve-local.mjs 8093
  *     STORE=redis node tests/serve-local.mjs 8094     (against a fake REST endpoint)
  */
 
 import { createServer } from 'node:http';
-import { buildEntry, toWebHandler } from '../shared/handler.mjs';
-import { blobStore } from '../shared/blob-store.mjs';
-import { restKvStore } from '../shared/rest-kv-store.mjs';
+// Imported from the TEMPLATES themselves, not from a shared copy, so this harness
+// exercises the exact files each platform deploys.
+import { buildEntry, toWebHandler } from '../netlify/lib/handler.mjs';
+import { blobStore } from '../netlify/lib/blob-store.mjs';
+import { restKvStore } from '../vercel/lib/rest-kv-store.mjs';
 
 const port = Number(process.argv[2] || 8093);
 const which = process.env.STORE || 'blob';

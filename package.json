@@ -1,0 +1,11 @@
+{
+  "name": "agent-entry-serverless",
+  "private": true,
+  "type": "module",
+  "description": "Agent Entry deploy templates for Cloudflare Workers, Vercel and Netlify",
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/check-sync.mjs && node tests/check-vercel-shape.mjs",
+    "keygen": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+  }
+}

@@ -74,15 +74,17 @@ wrangler deploy
 #   netlify deploy --prod
 ```
 
-Then confirm it with something that is not this repo:
+Then confirm it, with a checker that ships here and needs nothing you do not already have:
 
 ```bash
-python3 receptor_check.py --handshake https://your-deployment.example
+node tests/check-live.mjs --handshake https://your-deployment.example
 ```
 
-`receptor_check.py` is in the muretai core repo (`tools/receptor_check.py`). It speaks only
-HTTP, so it judges your door the way a stranger does. Read-only by default; `--handshake`
-also sends a real signed message and the full refusal battery.
+It speaks only HTTP, so it judges your door the way a stranger does: fetches the card,
+verifies its signature and freshness, checks that the card names the origin you dialled,
+walks the CORS and method rules, and — with `--handshake` — sends a real signed message and
+every forged variant a door must refuse. Read-only without the flag. Exit status gates a
+deploy.
 
 ## Two things that will bite you
 
@@ -118,25 +120,43 @@ file on your server brings agent traffic is selling something.
 
 ## Honesty about testing
 
-[MEASURED.md](MEASURED.md) lists exactly what was executed and what was only reviewed. Short
-version: the Workers template was run on real workerd and scores 39/39 against the
-independent checker; the Vercel and Netlify **handlers and store adapters** were executed
-and also score 39/39, while their **platform routing config** (`vercel.json` rewrites,
-Netlify's `config.path`) was reviewed and not executed, because neither CLI is installed
-here and both need an account.
+[MEASURED.md](MEASURED.md) lists exactly what was executed and what was only reviewed, and
+it records the one claim that was wrong the first time round and the bug that followed from
+it. Short version: the Workers template runs on real workerd and scores 40/40 against the
+in-repo checker; the Vercel and Netlify **handlers and store adapters** were executed and
+also score 40/40; Vercel's handler SHAPE is checked against @vercel/node's own detection
+code; and the **platform routing config** (`vercel.json` rewrites, Netlify's `config.path`)
+was reviewed and not executed, because neither CLI is installed here and both need an
+account.
 
 ## Layout
 
 ```
-shared/handler.mjs         one Request -> Response handler; Vercel and Netlify both use it
-shared/rest-kv-store.mjs   Upstash/Vercel KV over REST, zero dependencies
-shared/blob-store.mjs      Netlify Blobs
-shared/muretai-agent-entry.mjs   the library (vendored, unmodified)
-workers/                   Cloudflare: its own worker + KV adapter
-vercel/                    api route + rewrites
-netlify/                   function + routing via config.path
-tests/serve-local.mjs      runs the shared handler over plain Node so a checker can judge it
+workers/     wrangler.toml + src/{worker,store,muretai-agent-entry}.mjs
+vercel/      vercel.json  + api/entry.mjs + lib/{handler,rest-kv-store,muretai-agent-entry}.mjs
+netlify/     netlify.toml + netlify/functions/entry.mjs + lib/{handler,blob-store,…}.mjs
+tests/       check-live.mjs (judge a deployed door) · check-sync.mjs · check-vercel-shape.mjs
+             serve-local.mjs (run a template's handler on plain Node)
 ```
+
+**Each template directory is self-contained on purpose.** You can copy just the one you want
+and deploy it, and — more importantly — a platform told to build from a subdirectory cannot
+reach a shared folder above it. An earlier layout put the library in a top-level `shared/`,
+which would have failed the moment anyone set a root directory on Vercel or Netlify.
+
+The price is three copies of the library, and the price of copies is drift, so
+`npm test` fails if they stop matching.
+
+### About the vendored library
+
+`muretai-agent-entry.mjs` is a copy of muretai's Agent Entry library, MIT-licensed, included
+so these templates deploy with no install step. It is **a build that includes the `store`
+option** these templates depend on.
+
+Do not replace it with an older published copy of `@muretai/agent-entry` and expect the same
+behaviour: versions without the `store` seam accept the option and silently **ignore** it,
+which drops the replay set, the device pins and the ledger back into per-instance memory —
+the exact three failures this repo exists to prevent — with no error and nothing failing.
 
 ## Licence
 

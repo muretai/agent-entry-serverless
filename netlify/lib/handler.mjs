@@ -74,8 +74,22 @@ export function toWebHandler(getEntry) {
       ? new Uint8Array(await request.arrayBuffer())
       : new Uint8Array(0);
 
-    const out = await entry.handleRequestAsync(request.method, url.pathname, headers, body);
-    return new Response(out.status === 204 ? null : out.body,
-      { status: out.status, headers: out.headers });
+    try {
+      const out = await entry.handleRequestAsync(request.method, url.pathname, headers, body);
+      return new Response(out.status === 204 ? null : out.body,
+        { status: out.status, headers: out.headers });
+    } catch (e) {
+      // THE STORE IS ALLOWED TO FAIL, AND WHEN IT DOES IT MUST FAIL CLOSED.
+      //
+      // The adapters deliberately do NOT swallow read errors: a swallowed error reads as
+      // "this messageId is new" and "this device has no owner", which silently disables
+      // the replay guard and lets a device be re-pinned to a different owner. So errors
+      // propagate to here, where they become a JSON-RPC internal error — the caller is
+      // told nothing useful, retries safely, and no security rule was quietly skipped.
+      console.error('agent-entry request failed:', e && e.message);
+      return new Response(
+        '{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}',
+        { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+    }
   };
 }

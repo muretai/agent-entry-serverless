@@ -30,7 +30,12 @@ export function blobStore(store) {
     async seenMessage(messageId, ttl) {
       const key = `replay/${safe(messageId)}`;
       const now = Math.floor(Date.now() / 1000);
-      const existing = await store.get(key, { type: 'json' }).catch(() => null);
+      // NO `.catch(() => null)` HERE, and that omission is the point. A swallowed read
+      // error is indistinguishable from "this messageId is new", so a transient Blobs
+      // outage would silently re-open every captured message to replay. The library's
+      // contract says null means NO ENTRY, never "the lookup failed" — so a failure must
+      // propagate and become a -32603, not a false negative.
+      const existing = await store.get(key, { type: 'json' });
       if (existing && typeof existing.exp === 'number' && existing.exp > now) {
         return false;                            // still inside the window: a replay
       }
@@ -39,7 +44,7 @@ export function blobStore(store) {
     },
 
     async getAccount(did) {
-      return store.get(`acct/${safe(did)}`, { type: 'json' }).catch(() => null);
+      return store.get(`acct/${safe(did)}`, { type: 'json' });
     },
 
     async putAccount(did, row) {
@@ -54,8 +59,12 @@ export function blobStore(store) {
     },
 
     async getDeviceOwner(deviceDid) {
-      const v = await store.get(`pin/${safe(deviceDid)}`).catch(() => null);
-      return v || null;
+      // Also uncaught, and this is the sharper one: a swallowed error here reads as
+      // "this device has no owner", so the caller re-pins it to whoever asked — permanent,
+      // silent transfer of a device to a different owner, plus a ledger merge. The library
+      // calls a lost pin an UNBOUNDED loss for exactly this reason.
+      const v = await store.get(`pin/${safe(deviceDid)}`);
+      return v === undefined ? null : (v || null);
     },
 
     async putDeviceOwner(deviceDid, ownerDid) {

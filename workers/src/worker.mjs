@@ -90,7 +90,13 @@ export default {
       : new Uint8Array(0);
 
     try {
-      const out = await entry.handleRequestAsync(request.method, url.pathname, headers, body);
+      const out = await entry.handleRequestAsync(
+        // The FULL request-target, query included — the library refuses to claim a POST
+        // that carries a query string (the door's address is the signed card's url,
+        // byte-exact and query-less), and it can only refuse what it is shown. An
+        // adapter that hands over url.pathname alone strips the query before the rule
+        // can see it, and the door is back to eating `?wc-api=`-shaped webhooks.
+        request.method, url.pathname + url.search, headers, body);
       return new Response(out.status === 204 ? null : out.body,
         { status: out.status, headers: out.headers });
     } catch (e) {

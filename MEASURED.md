@@ -4,7 +4,8 @@ Every claim in this repo's README that a runtime "works" is one of the rows belo
 that say *reviewed, not executed* are exactly that, and are not dressed up as anything
 else.
 
-Measured 2026-08-21.
+Measured 2026-08-21. Re-measured later the same day for the **query-string rule** — see the
+section at the end.
 
 ## Cloudflare Workers — EXECUTED
 
@@ -30,7 +31,9 @@ needed it anyway.
 
 The **full template** (`workers/`, with real Workers KV via wrangler's local KV) was then
 judged over HTTP by `node tests/check-live.mjs --handshake` (which ships in this repo):
-**40/40, 0 failed** — the same verdict the Node, Python, and PHP implementations get.
+**40/40, 0 failed** — the same verdict the Node, Python, and PHP implementations get. (The
+checker had 40 checks at the time; it now has 42 — see the query-string section below for
+what was and was not re-run.)
 
 Not measured: a deploy to Cloudflare's actual edge. Local workerd is the same engine, but
 it is not the same network, and a zone in front of it can still refuse agents — see the
@@ -70,8 +73,8 @@ the same surfaces the real services expose, and judged by `tests/check-live.mjs`
 
 | store adapter | verdict |
 |---|---|
-| `netlify/lib/blob-store.mjs` (Netlify Blobs surface) | **40/40, 0 failed** |
-| `vercel/lib/rest-kv-store.mjs` (Upstash/Vercel KV REST) | **40/40, 0 failed** |
+| `netlify/lib/blob-store.mjs` (Netlify Blobs surface) | **42/42, 0 failed** |
+| `vercel/lib/rest-kv-store.mjs` (Upstash/Vercel KV REST) | **42/42, 0 failed** |
 
 **Still not executed:** `vercel.json` rewrites and Netlify's `config.path` export — the
 routing layer that decides which requests reach the handler at all — and the real network
@@ -98,3 +101,34 @@ signed message, and the window is small — but "small" is not "closed". If that
 your door, use the Redis adapter (it works unchanged from any of the three platforms) or,
 on Cloudflare, swap Workers KV for Durable Objects, which give a real single-writer
 test-and-set. Nothing else in the template changes.
+
+## The query-string rule (re-measured 2026-08-21)
+
+The library now refuses to claim a POST whose request-target carries a query string — the
+door's address is the signed card's `url`, byte-exact and query-less, while a site's
+query-multiplexed routes (`?wc-api=` payment webhooks above all) always carry one. The
+checker gained two probes for it: a webhook-shaped JSON POST with a query, and a correctly
+signed message with one, must both earn anything BUT a door protocol verdict.
+
+**The probes immediately found a real bug in all three templates here.** Each adapter handed
+the library `url.pathname` — the query already stripped — so the library's refusal could
+never fire, and a door built from these templates would have kept eating webhook-shaped
+POSTs even though its vendored library was correct. Fixed by handing over the full
+request-target (`url.pathname + url.search`) in `vercel/lib/handler.mjs`,
+`netlify/lib/handler.mjs`, and `workers/src/worker.mjs`. A library can only refuse what its
+adapter shows it; this is the second adapter-boundary bug in this repo (the first was the
+Vercel export shape), and both were invisible to every test that exercised the library
+alone.
+
+| probe | result |
+|---|---|
+| blob adapter, full serve-local battery | **42/42, 0 failed** |
+| redis/kv adapter, full serve-local battery | **42/42, 0 failed** |
+| JSON webhook POST to `/?check=1` | falls through — no door verdict |
+| correctly signed message POSTed to `/?x=1` | falls through — no door verdict |
+
+Not re-run: the workerd (`wrangler dev --local`) pass — the change is pure request routing
+with no new platform API, and the routing layer it changes (`worker.mjs`) is exercised here
+over plain Node. The `vercel.json` rewrites and Netlify `config.path` remain reviewed, not
+executed, as above; note that both platforms preserve the query string when routing to a
+function, which is exactly why the adapter must not strip it.

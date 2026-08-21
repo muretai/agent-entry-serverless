@@ -122,12 +122,14 @@ file on your server brings agent traffic is selling something.
 
 [MEASURED.md](MEASURED.md) lists exactly what was executed and what was only reviewed, and
 it records the one claim that was wrong the first time round and the bug that followed from
-it. Short version: the Workers template runs on real workerd and scores 40/40 against the
-in-repo checker; the Vercel and Netlify **handlers and store adapters** were executed and
-also score 40/40; Vercel's handler SHAPE is checked against @vercel/node's own detection
-code; and the **platform routing config** (`vercel.json` rewrites, Netlify's `config.path`)
-was reviewed and not executed, because neither CLI is installed here and both need an
-account.
+it. Short version: the Workers template runs on real workerd and scored a clean sweep
+against the in-repo checker; the Vercel and Netlify **handlers and store adapters** were
+executed and score 42/42; Vercel's handler SHAPE is checked against @vercel/node's own
+detection code; and the **platform routing config** (`vercel.json` rewrites, Netlify's
+`config.path`) was reviewed and not executed, because neither CLI is installed here and
+both need an account. MEASURED.md also records the adapter bug the newest probes caught:
+all three templates handed the library a query-stripped path, which would have let a door
+keep eating `?wc-api=`-shaped webhooks even with a correct library underneath.
 
 ## Layout
 

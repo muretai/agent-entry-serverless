@@ -232,6 +232,27 @@ if (handshake && did) {
   check((await post(null, `{"jsonrpc":"2.0","id":"x","method":"message/send","params":{"message":`
     + `{"kind":"message","parts":[{"kind":"text","text":"${'A'.repeat(1024 * 1024 + 64)}"}]}}}`)).status === 413,
     'a body over 1 MiB is HTTP 413');
+
+  // A QUERY STRING MEANS THE POST IS NOT THE DOOR'S — whatever the body. The door's
+  // address is the signed card's url, byte-exact, and no query ever appears in one, while
+  // a site's query-multiplexed routes (`?wc-api=` payment webhooks) always carry one. A
+  // door that claims such a POST answers a webhook HTTP 200, and the sender records the
+  // event as delivered and never retries — measured before this check existed. Anything
+  // may answer here EXCEPT a door protocol verdict.
+  const notDoor = (r) => {
+    try { return !('jsonrpc' in JSON.parse(r.text)); } catch { return true; }
+  };
+  const qHook = await req('POST', base + '/?check=1',
+    { body: JSON.stringify({ id: 'evt_check', object: 'event' }),
+      headers: { 'Content-Type': 'application/json' } });
+  check(notDoor(qHook), 'a JSON POST with a query string is never answered by the door',
+    `status ${qHook.status}, body ${qHook.text.slice(0, 100)}`);
+  const qSigned = await req('POST', base + '/?x=1',
+    { body: JSON.stringify(msg('via query')),
+      headers: { 'Content-Type': 'application/json' } });
+  check(notDoor(qSigned),
+    'even a correctly signed message is not the door\'s when a query string rides along',
+    `status ${qSigned.status}, body ${qSigned.text.slice(0, 100)}`);
 }
 
 console.log('-'.repeat(60));

@@ -3199,6 +3199,24 @@ export function createAgentEntry({
       // and when this entry is mounted under a path, "anywhere else" INCLUDES the bare
       // host, which belongs to the site (or to the neighbour agent) and not to us.
       if (!isMountPath(pathname)) return jsonResponse(404, { error: 'not found' });
+      // A QUERY STRING MEANS THE POST IS NOT OURS. The door's address is the signed
+      // card's `url`, byte-exact: a base URL carrying a query is refused at startup, and
+      // a visitor's walk drops any query it was handed before it POSTs the card's `url` —
+      // so no conformant caller can arrive here, while a site's own query-multiplexed
+      // traffic (`?wc-api=`, `?wc-ajax=`, `?rest_route=`) always does. Disjoint BY
+      // CONSTRUCTION, which is what makes this a rule and not a heuristic. Measured:
+      // WooCommerce Stripe delivers its only webhook to `/?wc-api=wc_stripe` (path `/`,
+      // application/json); a bare-origin door that claimed it answered HTTP 200/-32601
+      // echoing the event id, the sender recorded the event as delivered and never
+      // retried — payment events lost SILENTLY. The answer is the unowned-path 404
+      // above, same bytes, one meaning — the DECISION(non-door-post-answers-404-not-405)
+      // non-disclosure again, because the caller most likely to land here is the site's
+      // own webhook, which deserves the most anonymous answer, never a door verdict.
+      const hashless = target.split('#')[0];
+      const queryAt = hashless.indexOf('?');
+      if (queryAt !== -1 && queryAt + 1 < hashless.length) {
+        return jsonResponse(404, { error: 'not found' });
+      }
       const buf = bodyBuffer || Buffer.alloc(0);
       const out = handlePost(buf, headers);
       // The stage is read off the finished answer, so an async responder tallies when it

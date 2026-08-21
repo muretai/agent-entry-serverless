@@ -1,0 +1,9 @@
+# Never commit key material or local platform state.
+node_modules/
+.wrangler/
+.netlify/
+.vercel/
+*.log
+.env
+.env.*
+.DS_Store

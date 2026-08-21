@@ -1,0 +1,23 @@
+name = "agent-entry"
+main = "src/worker.mjs"
+compatibility_date = "2025-11-18"
+# Ed25519 signing and verification come from node:crypto, so this flag is REQUIRED.
+# Measured under workerd, not assumed: see MEASURED.md in the repo root.
+compatibility_flags = ["nodejs_compat"]
+
+# The door's durable state. Create it once:
+#   wrangler kv namespace create AGENT_ENTRY_KV
+# then paste the id it prints here.
+[[kv_namespaces]]
+binding = "AGENT_ENTRY_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# The PUBLIC address a visitor dials. It is signed into the card, and a visitor refuses a
+# card naming anything else — so this must be the real one, not the workers.dev preview,
+# once you put a domain in front.
+AGENT_ENTRY_BASE_URL = "https://agent.example.com"
+AGENT_ENTRY_NAME = "Agent Entry"
+
+# AGENT_ENTRY_SEED_HEX is THE PRIVATE KEY and never goes in this file:
+#   wrangler secret put AGENT_ENTRY_SEED_HEX

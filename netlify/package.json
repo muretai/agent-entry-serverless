@@ -1,0 +1,9 @@
+{
+  "name": "agent-entry-netlify",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@netlify/blobs": "^8.0.0" },
+  "scripts": {
+    "keygen": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+  }
+}

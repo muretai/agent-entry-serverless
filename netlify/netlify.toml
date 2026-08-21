@@ -1,0 +1,7 @@
+# Routing lives in the function's own `config.path` export (Netlify Functions v2), so the
+# door's routes cannot drift from a separate redirects file.
+[build]
+  publish = "public"
+
+[functions]
+  node_bundler = "esbuild"

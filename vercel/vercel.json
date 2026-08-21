@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/.well-known/agent-card.json", "destination": "/api/entry" },
+    { "source": "/.well-known/agent.json", "destination": "/api/entry" },
+    { "source": "/.well-known/agent-card.sig.json", "destination": "/api/entry" },
+    { "source": "/", "destination": "/api/entry" }
+  ]
+}

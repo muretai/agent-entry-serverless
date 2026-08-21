@@ -1,0 +1,8 @@
+{
+  "name": "agent-entry-vercel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "keygen": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+  }
+}

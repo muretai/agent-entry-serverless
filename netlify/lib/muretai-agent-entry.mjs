@@ -107,6 +107,17 @@ export const SIGNED_ENVELOPE_SCHEME = 'did-key-ed25519';
  *  examples/agent_entry_reference.py. */
 export const AGENT_ENTRY_REL = 'https://muretai.net/rel/agent-entry';
 
+/** The body `<a>` a site puts on its own front page so a snapshot / ARIA / `a[href]`
+ *  client (Camofox, Playwright accessibility dumps, markdown converters) can still find
+ *  the door. `<link rel>` in `<head>` and the HTTP `Link` header both vanish in those
+ *  views; an in-body anchor with this relation does not. `href` is the card path this
+ *  entry actually answers (mount-prefixed when the entry sits under a path). Must match
+ *  `body_signpost` in examples/agent_entry_reference.py. */
+export function bodySignpost(href = AGENT_CARD_PATH) {
+  const path = typeof href === 'string' && href ? href : AGENT_CARD_PATH;
+  return `<a href="${path}" rel="${AGENT_ENTRY_REL}">This site answers agents at ${path}</a>`;
+}
+
 /** Where a keyless visitor is sent to learn how to mint an identity and sign. It rides in
  *  the card AND in the refusal, so an agent that has only one of the two still has the URL.
  *
@@ -332,16 +343,42 @@ export const UA_FAMILIES = [
   ['perplexity', 'perplexity'],
   ['google-extended', 'google-extended'],
   ['muretai-node', 'muretai-node'],
+  // Leaking automation UAs. Must sit BEFORE `mozilla`: Camoufox/Playwright Firefox UAs
+  // start with "Mozilla/5.0 …" and a needle after that would never fire. A patched
+  // Camoufox sends a clean Firefox UA and classifies as `browser` — that is the
+  // stealth-agent case `clientClass` exists for, not a miss in this table.
+  ['camoufox', 'camoufox'],
+  ['camofox', 'camoufox'],
+  ['playwright', 'playwright'],
+  ['puppeteer', 'puppeteer'],
+  ['selenium', 'selenium'],
+  ['headlesschrome', 'headless-chrome'],
   ['curl', 'curl'],
   ['mozilla', 'browser'],
 ];
 
-/** The families that read as an AI agent — the ones the notice route signposts with a
- *  `Link` header. `muretai-node` is deliberately absent: its Outbox already walks the
- *  well-known card paths, so a signpost buys it nothing. Must match the same set in
- *  examples/agent_entry_reference.py. */
+/** The families that read as an AI agent. Since v1.11 this set steers NO wire byte —
+ *  the notice route's `Link` signpost is emitted for every caller (see `steerHeaders`
+ *  and ISSUE(agent-entry-unconditional-link)) — so it remains only as a published
+ *  classification an operator's own observation code can lean on. `muretai-node` is
+ *  deliberately absent: its Outbox already walks the well-known card paths. Must match
+ *  the same set in examples/agent_entry_reference.py. */
 export const AI_AGENT_FAMILIES = new Set([
   'claude-user', 'claudebot', 'gptbot', 'openai', 'perplexity', 'google-extended',
+]);
+
+/** Automation / HTTP-tool families that named themselves in the UA. OBSERVATION ONLY —
+ *  same rule as the rest of this table: never identity, never a verdict. Must match
+ *  `NAMED_TOOL_FAMILIES` in examples/agent_entry_reference.py. */
+export const NAMED_TOOL_FAMILIES = new Set([
+  'camoufox', 'playwright', 'puppeteer', 'selenium', 'headless-chrome', 'curl',
+]);
+
+/** The four owner-facing traffic classes `clientClass` may return. Bounded on purpose:
+ *  an attacker-chosen UA must never become a class name. Must match
+ *  `CLIENT_CLASSES` in examples/agent_entry_reference.py. */
+export const CLIENT_CLASSES = new Set([
+  'declared-agent', 'named-tool', 'stealth-agent', 'human-like',
 ]);
 
 /** ASCII-only lowercase fold. NOT `toLowerCase()`: Unicode casing is runtime- and
@@ -357,7 +394,7 @@ function asciiLower(s) {
 }
 
 /** UA string -> family. Absent/empty/non-string -> 'none'; no needle matched -> 'other'.
- *  Total on untrusted input, and the RETURN VALUE is always one of the twelve fixed
+ *  Total on untrusted input, and the RETURN VALUE is always one of the fixed
  *  family names — never a substring of the input (bounded stats keyspace). */
 export function uaFamily(ua) {
   if (typeof ua !== 'string' || !ua) return 'none';
@@ -366,6 +403,23 @@ export function uaFamily(ua) {
     if (folded.includes(needle)) return family;
   }
   return 'other';
+}
+
+/** Owner-facing traffic class. OBSERVATION ONLY — never `verified`, never a ledger row,
+ *  never a rate lane, never a refusal. The split an operator asked for: tell agent
+ *  traffic from human traffic WITHOUT treating a spoofable UA as a credential.
+ *
+ *  Camoufox / patched Playwright send a clean Firefox UA, so `uaFamily` says `browser`.
+ *  That is not a human reading the homepage. A human Firefox almost never GETs the
+ *  agent card or POSTs the door; a stealth agent that found the door does. The one
+ *  human-shaped case at the door is `browser` + `notice_get` (someone opened the
+ *  address as a document on a site-owning mount). Must match `client_class` in
+ *  examples/agent_entry_reference.py. */
+export function clientClass(family, stage) {
+  if (AI_AGENT_FAMILIES.has(family) || family === 'muretai-node') return 'declared-agent';
+  if (NAMED_TOOL_FAMILIES.has(family)) return 'named-tool';
+  if (family === 'browser' && stage === 'notice_get') return 'human-like';
+  return 'stealth-agent';
 }
 
 /** The FIRST User-Agent value out of a headers mapping, or null. Case-insensitive key
@@ -1706,7 +1760,7 @@ function jsonResponse(status, obj, extraHeaders = {}) {
   };
 }
 
-function rpcError(id, error, data) {
+function baseRpcError(id, error, data) {
   const err = { ...error };
   if (data) err.data = data;
   return jsonResponse(200, { jsonrpc: '2.0', id: id ?? null, error: err });
@@ -2289,12 +2343,28 @@ export function canonicalMount(canonUrl, basePath) {
  *                  callback, and a watcher that dialled out on the hot path would make the
  *                  visitor's answer depend on somebody else's uptime.
  *
+ *                  WHAT IT IS TOLD. Every stage reports `stage`, `identified`,
+ *                  `ua_family` — the door's own bounded classification of the client, one
+ *                  of the fixed `UA_FAMILIES` names and NEVER a substring of what the caller
+ *                  sent, so a stranger cannot write its own label into your metrics — and
+ *                  `client_class`, the four-way split (`declared-agent` / `named-tool` /
+ *                  `stealth-agent` / `human-like`) that tells an operator whether a
+ *                  Firefox-looking knock is a stealth agent at the door or a human who
+ *                  opened the notice. The POST stages add the envelope on top.
+ *
  *                  WHAT NOT TO PUT IN IT. The envelope carries `peer_did`/`owner_did`,
  *                  which a visitor handed you to transact with YOU. Forwarding a raw DID to
  *                  a third party shares a durable identifier its owner never offered them;
  *                  if you need a metric, send a salted, site-scoped digest and keep the DID
  *                  in your own store. This module ships no sink and names no vendor — the
  *                  slot is here so an adapter can live outside it.
+ *   store          OPTIONAL duck-typed persistence (T105). Five methods, each may return a
+ *                  value or a promise: `seenMessage`, `getAccount`, `putAccount`,
+ *                  `getDeviceOwner`, `putDeviceOwner`. Absent, state stays in process.
+ *                  A serverless instance keeps nothing between requests; without a store
+ *                  the replay set, the device pins and the ledger reset on every cold start.
+ *                  Validated at construction — a partial store throws rather than silently
+ *                  disabling a security rule. Rate counters stay in-process on purpose.
  */
 export function createAgentEntry({
   seedHex,
@@ -2432,6 +2502,18 @@ export function createAgentEntry({
     },
   };
   card.security = [{ [SIGNED_ENVELOPE_SCHEME]: [] }];
+  // WHERE A 1.0-NATIVE READER FINDS THE ENDPOINT. A2A 1.0 removed the top-level `url` /
+  // `preferredTransport` pair in favour of `supportedInterfaces`, so a client written
+  // against 1.0 greps for exactly this field and, without it, learns nothing from this
+  // card about where to POST. `url` is doorUrl — the address message/send is actually
+  // POSTed to, the same string the securitySchemes `exampleRequest`'s `endpoint` names —
+  // and deliberately NOT canonUrl, which at a bare origin differs from the door by the
+  // trailing slash (canonUrl's bytes are pinned and signed; this entry is what carries
+  // the canonical POST form). Appended last so every field an already-deployed entry
+  // publishes keeps its bytes AND its position.
+  card.supportedInterfaces = [
+    { url: doorUrl, protocolBinding: 'JSONRPC', protocolVersion: PROTOCOL_VERSION },
+  ];
 
   const cardBytes = Buffer.from(JSON.stringify(card), 'utf8');   // identical bytes on both paths
   // ACCOUNT DID -> {first_seen, last_seen, messages}. Keyed by the RESOLVED account (T102):
@@ -2563,11 +2645,41 @@ export function createAgentEntry({
   // composition to any stranger). Keyspace bounded by the fixed UA_FAMILIES table times
   // five stage names — an attacker choosing UA strings cannot grow it.
   const uaStats = new Map();
+  const clientStatsMap = new Map();
 
+  /** Count the stage, and tell the watcher about it.
+   *
+   *  Every stage a visitor can reach already passes through here — `card_get`, `notice_get`,
+   *  `anon_post`, `signed_post`, `refused_post` — so this is where the observer learns HOW FAR
+   *  somebody got. It could previously see only the conversations: a site shipping visits to
+   *  analytics got the answered messages and nothing else, no card fetch, no notice read, no
+   *  keyless walk-in. The interesting shape of agent traffic is exactly that drop-off — how
+   *  many looked, how many tried, how many got in.
+   *
+   *  Reported from HERE and not from a second place, so the watcher and `entry.stats()` can
+   *  never disagree about what happened, and a stage added later is reported without anyone
+   *  remembering to. `identified` rides along because "no DID at all" and "had a DID and was
+   *  refused" are different answers for a site deciding whether to open the anonymous lane.
+   *
+   *  A GET carries no envelope, so the watcher is told what is true and nothing invented: no
+   *  DIDs, no text, `verified: false`. The POST stages are handed to `respond()` /
+   *  `observeRefusal()` instead, which know the envelope — one visit, one row, never two.
+   *  `ua_family` is the one field BOTH sides report, so a watcher can ask "which clients got
+   *  in and which were turned away" as one question instead of two half-answers. */
   function tally(family, stage) {
     let row = uaStats.get(family);
     if (!row) { row = new Map(); uaStats.set(family, row); }
     row.set(stage, (row.get(stage) || 0) + 1);
+    const cls = clientClass(family, stage);
+    let crow = clientStatsMap.get(cls);
+    if (!crow) { crow = new Map(); clientStatsMap.set(cls, crow); }
+    crow.set(stage, (crow.get(stage) || 0) + 1);
+    if (typeof observer !== 'function') return;
+    if (stage === 'card_get' || stage === 'notice_get') {
+      observe({ stage, identified: 0, verified: false, ua_family: family,
+                client_class: cls,
+                peer_did: null, owner_did: null, wba_did: null, text: null });
+    }
   }
 
   /** A plain JSON-able copy of the counters: { family: { stage: n } }. */
@@ -2580,25 +2692,43 @@ export function createAgentEntry({
     return out;
   }
 
-  /** The `Link` header the notice route carries. TWO relations with different audiences,
-   *  in ONE header field (RFC 8288 allows several link-values in one field, and one field
-   *  is what keeps the two twins' bytes identical through their single-header plumbing):
+  /** A plain JSON-able copy of the traffic-class counters: { class: { stage: n } }.
+   *  Same contract as `stats()`: in-process only, never on the wire, bounded keyspace. */
+  function clientStats() {
+    const out = {};
+    for (const [cls, row] of clientStatsMap) {
+      out[cls] = {};
+      for (const [stage, n] of row) out[cls][stage] = n;
+    }
+    return out;
+  }
+
+  /** The `Link` header the notice route carries — the SAME one-field value for EVERY
+   *  caller. TWO relations in ONE header field (RFC 8288 allows several link-values in
+   *  one field, and one field is what keeps the two twins' bytes identical through their
+   *  single-header plumbing):
    *
-   *    - the DOOR pointer, `rel="https://muretai.net/rel/agent-entry"`, for EVERY caller.
-   *      This is the coexistence primitive (E4): an agent that fetched a page finds the
+   *    - `rel="service-desc"` (RFC 8631's registered relation for "service description …
+   *      primarily intended for consumption by machines"), FIRST. It was emitted only to
+   *      the UA families that read as an AI agent (the T119 signpost) until a
+   *      third-party scanner (agentcard.org, 2026-08-21) measured that conditioned
+   *      emission as invisible: its crawler is none of our families, so a working door
+   *      scored as publishing no service description at all — the revisit trigger
+   *      recorded in ISSUE(agent-entry-unconditional-link). A header conditioned on a
+   *      guess about the reader is invisible to exactly the readers the guess missed,
+   *      so it is now emitted for every caller.
+   *    - the DOOR pointer, `rel="https://muretai.net/rel/agent-entry"`. This is the
+   *      coexistence primitive (E4): an agent that fetched a page finds the
    *      machine-readable door in the RESPONSE, with no HTML to parse and no prose to
    *      read, and a browser ignores it — which is what lets a site keep its own front
    *      page and add ONE header instead of migrating. An absolute URI because RFC 8288
    *      §2.1.2 permits a bare token only for an IANA-registered relation.
-   *    - `rel="service-desc"` (RFC 8631's registered relation for "service description …
-   *      primarily intended for consumption by machines"), FIRST and only for the UA
-   *      families that read as an AI agent — the T119 signpost, unchanged in meaning.
    *
-   *  HEADER-ONLY on purpose: the notice BODY is byte-identical for every caller, so what
-   *  the UA changes is still only this one additive relation and never a verdict. */
-  function steerHeaders(family) {
+   *  HEADER-ONLY on purpose: the notice BODY is byte-identical for every caller, and now
+   *  so is this header — the UA family still steers observation (`tally`/`stats`), never
+   *  a byte on the wire. */
+  function steerHeaders(family) {   // `family` kept for observation symmetry, unread here
     const door = `<${mount}${AGENT_CARD_PATH}>; rel="${AGENT_ENTRY_REL}"`;
-    if (!AI_AGENT_FAMILIES.has(family)) return { Link: door };
     return { Link: `<${mount}${AGENT_CARD_PATH}>; rel="service-desc", ${door}` };
   }
 
@@ -2809,7 +2939,98 @@ export function createAgentEntry({
    * size checks come BEFORE any parsing or crypto — a check placed after the signature is
    * a check the attacker simply skips.
    */
+  /** The code of the refusal this request produced, or null when it was answered. Set by the
+   *  entry-local `rpcError` below so the funnel can report it without re-parsing a Buffer. */
+  let lastRefusal = null;
+
+  /** The stage `tally()` computed for the POST currently in flight, handed to whichever
+   *  observation point reports it. `tally()` runs AFTER the ladder returns, so the answered
+   *  case is observed before this is set — which is why `respond()` reads it lazily rather
+   *  than being passed it. */
+  let pendingStage = null;
+
+  /** The client family for the POST currently in flight, handed to the same observation
+   *  points as `pendingStage` and for the same reason. The GET stages already carry
+   *  `ua_family` — it is what `tally()` counts under — and a KNOCK, the stage where "who is
+   *  this client" matters most, was the one arriving without it. A watcher could see that a
+   *  browser fetched the card and NOT that a browser was the thing being refused, which
+   *  leaves the two questions an operator actually has (is this a crawler? is somebody's
+   *  agent failing to sign?) answerable only for the visitors who did not try.
+   *
+   *  Derived from the same request `route()` derived its own `family` from, and `uaFamily` is
+   *  a pure function of that one header, so the two cannot disagree. Recomputed rather than
+   *  threaded through a signature every call site would have to remember to pass — the same
+   *  argument `rpcError` makes for shadowing itself a few lines below. Set and read together
+   *  with `pendingStage`, so it inherits exactly that field's accepted skew under an async
+   *  responder and can never disagree with the stage it is reported beside. */
+  let pendingFamily = 'none';
+
+  /** Shadows the module-level `rpcError` for the whole entry: same return value, and it
+   *  remembers the code on the way out. A local alias rather than seventeen edits, and rather
+   *  than a parameter every refusal site would have to remember to pass. */
+  const rpcError = (id, error, data) => {
+    lastRefusal = error && typeof error.code === 'number' ? error.code : null;
+    return baseRpcError(id, error, data);
+  };
+
+  /** Every POST outcome, observed once, at the single point they all funnel through.
+   *
+   *  `respond()` observes the answered case with the full envelope. Everything else — the
+   *  keyless walk-in, the bad signature, the flood that hit a ceiling — returned an rpcError
+   *  and was never seen at all, so a door could count who it TALKED to and never who it TURNED
+   *  AWAY. For a site asking whether agents are arriving, the refusals are the signal: an agent
+   *  that could not get in is the one nobody hears from again. It also made the documented
+   *  contract false, since the guide says the observer runs once per message, after the verdict,
+   *  and a refusal IS a verdict.
+   *
+   *  Structural rather than enumerated ON PURPOSE. Seventeen refusal sites would have been
+   *  seventeen chances to forget, and the eighteenth would be forgotten by construction.
+   *
+   *  The code is read from `lastRefusal`, set by `rpcError` on its way out, rather than by
+   *  re-parsing the response — the body is already a Buffer by then, and a watcher must never
+   *  cost a JSON round-trip on the reply path.
+   *
+   *  A refusal hands the watcher only what was actually established: `refused` carries the
+   *  JSON-RPC code and the DIDs are null, because a walk-in that named nobody named nobody. The
+   *  watcher still cannot matter — same swallowed throw, same discarded return. */
   function handlePost(rawBody, reqHeaders) {
+    lastRefusal = null;
+    // The stage a POST reaches is decided by whether it CARRIED a signature, which is knowable
+    // from the request alone — so it is settled here, before the ladder answers, and read by
+    // whichever observation point fires. `tally()` computes the same thing afterwards from the
+    // finished reply, for the counters; the two agree because they ask the same question.
+    pendingStage = postRequestStage(rawBody);
+    pendingFamily = uaFamily(uaOf(reqHeaders));
+    const out = handlePostLadder(rawBody, reqHeaders);
+    if (isThenable(out)) return out.then((o) => { observeRefusal(); return o; });
+    observeRefusal();
+    return out;
+  }
+
+  /** The answered case is already observed inside `respond()`; this adds refusals only, so no
+   *  message is ever observed twice. */
+  function observeRefusal() {
+    if (typeof observer !== 'function' || lastRefusal === null) return;
+    observe({ verified: false, refused: lastRefusal, stage: 'refused_post',
+              identified: pendingStage === 'signed_post' ? 1 : 0, ua_family: pendingFamily,
+              client_class: clientClass(pendingFamily, 'refused_post'),
+              peer_did: null, owner_did: null, wba_did: null, text: null });
+  }
+
+  /** Did this POST body carry a signature? That is the whole difference between a keyless
+   *  walk-in and an identified visitor, and it is answerable from the request without waiting
+   *  for the verdict — a bad signature is still a visitor who HAD a key. Parsed defensively:
+   *  anything unreadable is a walk-in, because it certainly did not present an identity. */
+  function postRequestStage(rawBody) {
+    try {
+      const buf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || '');
+      const req = JSON.parse(buf.toString('utf8'));
+      const meta = req?.params?.message?.metadata;
+      return (meta && typeof meta.sig === 'string' && meta.sig) ? 'signed_post' : 'anon_post';
+    } catch { return 'anon_post'; }
+  }
+
+  function handlePostLadder(rawBody, reqHeaders) {
     // RAW BYTES, always. A host app that hands us a decoded string has already destroyed
     // the evidence the strict decode below exists to find, so normalise once and measure
     // the SIZE in bytes rather than in UTF-16 code units.
@@ -3052,7 +3273,12 @@ export function createAgentEntry({
   }
 
   function respond(env, reqId, msg, toDid) {
-    observe(env);
+    // The answered case: the envelope already says who this was, and the stage says how they
+    // arrived. `identified` is read off the envelope rather than the stage, because the
+    // anonymous lane answers a visitor who genuinely presented no DID.
+    observe({ ...env, stage: pendingStage, ua_family: pendingFamily,
+              client_class: clientClass(pendingFamily, pendingStage),
+              identified: env && env.peer_did ? 1 : 0 });
     let answer;
     try {
       answer = responder(env);
@@ -3171,8 +3397,8 @@ export function createAgentEntry({
         return { status: 200,
           headers: { 'Content-Type': 'text/plain; charset=utf-8',
             'Content-Length': String(body.length),
-            // The ONE wire-visible thing observation adds: an AI-agent UA is pointed at
-            // the machine-readable door. The body above is byte-identical either way.
+            // Every caller is pointed at the machine-readable door — the same one-field
+            // Link value for all of them (v1.11). The body above is byte-identical too.
             ...steerHeaders(family) },
           body };
       }
@@ -3354,9 +3580,10 @@ export function createAgentEntry({
 
   // `mount` is exported so a host app can route exactly what this entry answers (and log
   // it): it is derived, so reading it here can never disagree with the signed card.
-  // `stats` is the owner-facing UA-family counters and `wbaVisits` the DID->count of
-  // WBA-verified fetches — both in-process only, like `ledger`.
-  return { did, card, ledger, mount, stats, wbaVisits,
+  // `stats` is the owner-facing UA-family counters, `clientStats` the four-way
+  // traffic-class split, and `wbaVisits` the DID->count of WBA-verified fetches —
+  // all in-process only, like `ledger`.
+  return { did, card, ledger, mount, stats, clientStats, wbaVisits,
     handleRequest, handleRequestAsync, listen,
     cardEnvelope: () => JSON.parse(cardEnvelopeBytes().toString('utf8')) };
 }

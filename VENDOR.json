@@ -1,0 +1,26 @@
+{
+  "_": "Written by scripts/vendor.mjs; do not edit by hand. tests/check-vendor.mjs holds the three copies to these digests without any agent-entry checkout present, and re-derives them from this commit when one is beside this repository.",
+  "from": "agent-entry",
+  "repository": "https://github.com/muretai/agent-entry",
+  "ref": "f5d5aca",
+  "commit": "f5d5aca6ff558ab82f9713ef1f7c37ca69a8219c",
+  "version": "1.10.0",
+  "date": "2026-08-29",
+  "files": {
+    "workers/src/muretai-agent-entry.mjs": {
+      "source": "muretai-agent-entry.mjs",
+      "sha256": "d8003e52f8536ce0d0be1f3e55cdec3d6646c01f29bacceb87e26e1475b98476",
+      "transform": "patches/store-seam.patch"
+    },
+    "vercel/lib/muretai-agent-entry.mjs": {
+      "source": "muretai-agent-entry.mjs",
+      "sha256": "d8003e52f8536ce0d0be1f3e55cdec3d6646c01f29bacceb87e26e1475b98476",
+      "transform": "patches/store-seam.patch"
+    },
+    "netlify/lib/muretai-agent-entry.mjs": {
+      "source": "muretai-agent-entry.mjs",
+      "sha256": "d8003e52f8536ce0d0be1f3e55cdec3d6646c01f29bacceb87e26e1475b98476",
+      "transform": "patches/store-seam.patch"
+    }
+  }
+}

@@ -137,8 +137,11 @@ keep eating `?wc-api=`-shaped webhooks even with a correct library underneath.
 workers/     wrangler.toml + src/{worker,store,muretai-agent-entry}.mjs
 vercel/      vercel.json  + api/entry.mjs + lib/{handler,rest-kv-store,muretai-agent-entry}.mjs
 netlify/     netlify.toml + netlify/functions/entry.mjs + lib/{handler,blob-store,…}.mjs
-tests/       check-live.mjs (judge a deployed door) · check-sync.mjs · check-vercel-shape.mjs
-             serve-local.mjs (run a template's handler on plain Node)
+tests/       check-live.mjs (judge a deployed door) · check-sync.mjs · check-vendor.mjs
+             check-vercel-shape.mjs · serve-local.mjs (run a template's handler on plain Node)
+scripts/     vendor.mjs (pull the library from agent-entry at one commit, seam it, pin it)
+patches/     store-seam.patch (the `store` option, applied by vendor.mjs)
+VENDOR.json  which upstream commit and version the three copies are, and their sha256
 ```
 
 **Each template directory is self-contained on purpose.** You can copy just the one you want
@@ -151,9 +154,18 @@ The price is three copies of the library, and the price of copies is drift, so
 
 ### About the vendored library
 
-`muretai-agent-entry.mjs` is a copy of muretai's Agent Entry library, MIT-licensed, included
-so these templates deploy with no install step. It is **a build that includes the `store`
-option** these templates depend on.
+`muretai-agent-entry.mjs` is [`@muretai/agent-entry`](https://github.com/muretai/agent-entry),
+MIT-licensed, vendored into each template by `scripts/vendor.mjs` so these templates deploy
+with no install step. `VENDOR.json` at the root says which version: the upstream commit, its
+package version and date, and the sha256 of each copy as written. Each copy is **that upstream
+door plus `patches/store-seam.patch`** — the `store` option these templates depend on — and
+`npm test` (`tests/check-vendor.mjs`) holds every copy to the recorded digest; with an
+agent-entry checkout beside this repo (`../agent-entry`, or `$MURETAI_AGENT_ENTRY`) it also
+re-derives them from the recorded commit and says how far behind upstream the pin is.
+
+To move to a newer upstream, `node scripts/vendor.mjs --ref <tag>`, then commit the three
+copies and `VENDOR.json` together. Never edit a copy in place: a change belongs upstream, or
+in the patch.
 
 Do not replace it with an older published copy of `@muretai/agent-entry` and expect the same
 behaviour: versions without the `store` seam accept the option and silently **ignore** it,

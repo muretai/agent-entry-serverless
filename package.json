@@ -5,7 +5,8 @@
   "description": "Agent Entry deploy templates for Cloudflare Workers, Vercel and Netlify",
   "license": "MIT",
   "scripts": {
-    "test": "node tests/check-sync.mjs && node tests/check-vercel-shape.mjs",
+    "test": "node tests/check-sync.mjs && node tests/check-vendor.mjs && node tests/check-vercel-shape.mjs",
+    "vendor": "node scripts/vendor.mjs",
     "keygen": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
   }
 }

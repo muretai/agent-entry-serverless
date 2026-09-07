@@ -2185,6 +2185,43 @@ function domainFix(candidate) {
  * refuses every other bad value there. Truncating would start the entry with a claim that
  * is USABLE and NOT WHAT THEY SAID.
  */
+/** The kinds a visitor can take into a site, and the conditions a site may attach. Kept
+ *  identical to the visitor side (Agent Web Router `parsePrefer`): a kind or condition one
+ *  side knows and the other does not is a declaration one side silently drops. */
+export const PREFER_KINDS = ['page', 'card', 'mcp'];
+export const PREFER_WHEN = ['person', 'alone', 'key', 'no-key', 'token', 'browser'];
+
+/**
+ * The exact `agentEntry.prefer` this entry may publish, or a TypeError (AE-30).
+ *
+ * The site's own order of its ways in — "read on the page if you have no key, then the
+ * door", say. VALIDATED, NEVER REWRITTEN: this goes on a SIGNED card, and a card that says
+ * something the operator did not write is a worse card than none, so an unknown kind, an
+ * unknown condition or a stray key refuses the whole declaration instead of trimming it —
+ * the same posture as `canonicalDomains`. `null`/`undefined` means "not configured", and
+ * then no `prefer` key is published at all, which is what keeps an already-deployed
+ * entry's bytes unchanged.
+ */
+export function validatePrefer(prefer) {
+  if (prefer == null) return null;
+  if (!Array.isArray(prefer) || prefer.length === 0) {
+    throw new TypeError('agentEntry.prefer must be a non-empty array of "page" | "card" | "mcp" or {kind, when}');
+  }
+  for (const e of prefer) {
+    if (typeof e === 'string') {
+      if (!PREFER_KINDS.includes(e)) throw new TypeError(`agentEntry.prefer: unknown kind ${JSON.stringify(e)}`);
+      continue;
+    }
+    if (!e || typeof e !== 'object' || Array.isArray(e)) throw new TypeError('agentEntry.prefer: an entry must be a kind or {kind, when}');
+    const keys = Object.keys(e);
+    if (!PREFER_KINDS.includes(e.kind)) throw new TypeError(`agentEntry.prefer: unknown kind ${JSON.stringify(e.kind)}`);
+    if ('when' in e && !PREFER_WHEN.includes(e.when)) throw new TypeError(`agentEntry.prefer: unknown condition ${JSON.stringify(e.when)}`);
+    const stray = keys.filter((k) => k !== 'kind' && k !== 'when');
+    if (stray.length) throw new TypeError(`agentEntry.prefer: unexpected key(s) ${stray.join(', ')}`);
+  }
+  return prefer;
+}
+
 export function canonicalDomains(domains, { warn = true } = {}) {
   if (domains === undefined || domains === null) return [];
   if (!Array.isArray(domains)) {
@@ -2306,6 +2343,11 @@ export function canonicalMount(canonUrl, basePath) {
  *   responder      (envelope) => string | {text, contextId?, timestamp?} | Promise<…>
  *   openDoor       advertise `muretai.open_door` (default true) — the flag that tells a
  *                  visiting agent it may contact you without an introduction.
+ *   prefer         OPTIONAL: the site's own order of its ways in, published as
+ *                  `agentEntry.prefer` (AE-30) — e.g. `[{kind:'page', when:'no-key'}, 'card']`
+ *                  says "read on the page if you hold no key; otherwise the door". Validated
+ *                  by `validatePrefer`; an invalid list throws, so the entry never starts
+ *                  with a statement the operator did not make. Absent = no key published.
  *   anonymousLane  also accept UNSIGNED inquiries (default false). They create no account,
  *                  and the lane as a whole is capped at `anonRatePerMin` signed replies per
  *                  minute — it is unauthenticated, so it must not be an unmetered signing
@@ -2374,6 +2416,7 @@ export function createAgentEntry({
   version = '1',
   responder = () => 'Thanks — a human will follow up.',
   openDoor = true,
+  prefer = null,
   anonymousLane = false,
   anonRatePerMin = ANON_RATE_PER_MIN,
   signedRatePerMin = SIGNED_RATE_PER_MIN,
@@ -2449,7 +2492,10 @@ export function createAgentEntry({
   // Neutral key first, vendor key beside it for one release. See the securitySchemes block
   // below for why the old spelling stays: a consumer must learn the new name BEFORE
   // producers stop emitting the old one, never after.
-  if (openDoor) card.agentEntry = { open_door: true };
+  // AE-30: the site's order rides on the NEUTRAL key only; the alias stays `open_door`
+  // alone, so an old consumer that compares the two aliases byte for byte keeps passing.
+  const canonPrefer = validatePrefer(prefer);
+  if (openDoor) card.agentEntry = { open_door: true, ...(canonPrefer ? { prefer: canonPrefer } : {}) };
   if (openDoor) card.muretai = { open_door: true };
   // Deliberately NO `relay`/`enc_pub` on the card: those advertise a store-and-forward
   // mailbox, and an agent entry has no listener draining one. Advertising a mailbox nobody

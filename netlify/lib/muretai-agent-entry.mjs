@@ -616,6 +616,81 @@ function assertEncodable(s) {
   }
 }
 
+/** The bytes of a standard-base64 field that has EXACTLY ONE spelling, or null.
+ *
+ *  `Buffer.from(s, 'base64')` skips every character outside the alphabet and shrugs at
+ *  padding, so "AAAA", "A A A A", "AAAA!!!" and "AAAA=" all decode to the same four bytes.
+ *  A signature therefore has unlimited spellings: the same authenticated message can be
+ *  re-serialized without limit, and a peer that stores, logs or DE-DUPLICATES by the literal
+ *  `sig` string sees a fresh message every time. Python's `b64decode(..., validate=True)`
+ *  refuses all three, so a leniently-decoded field is also a twin divergence waiting for the
+ *  one input where the two implementations disagree about what arrived.
+ *
+ *  TWO tests, because THE ALPHABET IS NOT ENOUGH and assuming it is, is the trap this
+ *  function was first written into. `WBA_B64_STANDARD` (declared with the WBA constants
+ *  further down — one alphabet, in one place, because two copies of it drift) plus
+ *  `length % 4 === 0` is exactly what the Web Bot Auth parser applies to a `Signature`
+ *  member, and it looks total: the regex spells the alphabet without `=`, so padding can
+ *  only be the trailing one or two characters it allows. It still leaves a whole FAMILY of
+ *  spellings, because the last data character of a PADDED string carries bits nobody reads.
+ *  A 64-byte signature is 88 characters ending `==`; its final data character holds 6 bits
+ *  of which the decoder uses 2 and DISCARDS 4, so all 16 characters that share those top 2
+ *  bits decode to the identical 64 bytes — "…BQ==" through "…Bf==" are ONE signature under
+ *  SIXTEEN names, every one of them well-formed base64 that Python's
+ *  `b64decode(validate=True)` accepts too (it checks the alphabet, never the residual —
+ *  it takes all 64 characters there). One `=` discards 2 bits: a family of 4.
+ *
+ *  So the second test is the only one that actually says CANONICAL: decode, RE-ENCODE, and
+ *  demand the input back character for character. Every encoder in every language writes the
+ *  discarded bits as zero, so everything a real encoder ever produced round-trips unharmed
+ *  and no golden vector can move; only a hand-edited residual fails, which is precisely the
+ *  input that had no honest way to exist. Note where this leaves the twins: the residual is
+ *  a hole they SHARED, so closing it here does not create a divergence out of a divergence —
+ *  but shared/ does not round-trip yet and should, or the two will disagree about one
+ *  re-spelled signature in fifteen out of sixteen tries.
+ *
+ *  Refusal is `null`; each caller turns that into its OWN failure value (false / null),
+ *  never a throw, because every one of them is on the untrusted path. */
+function strictB64(value) {
+  if (typeof value !== 'string') return null;
+  if (!WBA_B64_STANDARD.test(value) || value.length % 4 !== 0) return null;
+  const raw = Buffer.from(value, 'base64');
+  if (raw.toString('base64') !== value) return null;   // the discarded trailing bits, above
+  return raw;
+}
+
+/** The bytes of an UNPADDED base64url field that has exactly one spelling, or null — the
+ *  base64url twin of `strictB64`, same trap, different alphabet. A 32-byte Ed25519 public
+ *  key is 43 characters: 258 bits carrying 256, so the LAST character holds 2 bits nobody
+ *  reads and the key has FOUR spellings — "…hzc", "…hzd", "…hze", "…hzf" decode to the
+ *  identical 32 bytes. Not academic on this path: `wbaThumbprint` derives the `keyid` from
+ *  the CANONICAL re-encoding, so all four spell ONE key id, and a JWKS could carry one key
+ *  four times while a directory that de-duplicates by the `x` string counts four.
+ *
+ *  THE RULE, spelled out because shared/jws.unb64url must agree with it character for
+ *  character and whichever side is more permissive becomes the split:
+ *    1. a string, else null;
+ *    2. `WBA_B64URL` — `[A-Za-z0-9_-]` only, so "+", "/" and "=" are refused and the input
+ *       is UNPADDED base64url or nothing;
+ *    3. `length % 4 !== 1` — one leftover character carries 6 bits and no byte;
+ *    4. decode, RE-ENCODE UNPADDED, and demand the input back character for character.
+ *  The EMPTY STRING PASSES this gate: it decodes to zero bytes and re-encodes to itself, and
+ *  it is the CALLER's length check that refuses it. A codec gate must not be the thing that
+ *  decides how long a key is — that belongs where the key's size is known.
+ *
+ *  Rule 3 is SUBSUMED by rule 4 (an unpadded encoding's length is never ≡ 1 mod 4, so such
+ *  an input can never equal a re-encoding) and is kept on purpose: it is cheaper than the
+ *  decode, it states the format's own reason rather than a consequence of it, and it is the
+ *  rule the Python twin spells out — dropping it here would leave two files whose rules READ
+ *  differently while behaving identically, which is the diff nobody re-derives at 2am. */
+function strictB64Url(value) {
+  if (typeof value !== 'string') return null;
+  if (!WBA_B64URL.test(value) || value.length % 4 === 1) return null;
+  const raw = Buffer.from(value, 'base64url');
+  if (raw.toString('base64url') !== value) return null;   // the discarded trailing bits
+  return raw;
+}
+
 // ================================================================ Ed25519 (node:crypto)
 //
 // Node wants DER, not raw bytes. These two prefixes are the whole trick:
@@ -655,8 +730,13 @@ export function publicKeyFromSeedHex(seedHex) {
   return pub.export({ format: 'der', type: 'spki' }).subarray(ED25519_SPKI_PREFIX.length);
 }
 
-/** Raw Ed25519 signature over `message` (Buffer|string), as a Buffer. */
+/** Raw Ed25519 signature over `message` (Buffer|string), as a Buffer. A STRING message is
+ *  the last place a payload becomes bytes, so it is guarded here as well as at every
+ *  canonical-payload site: Node's UTF-8 encoder answers a lone surrogate with U+FFFD and
+ *  signs it, while Python's `.encode("utf-8")` raises — the signature would then be over
+ *  bytes the sender never wrote and the twin cannot even produce. */
 export function signBytes(seedHex, message) {
+  if (!Buffer.isBuffer(message)) assertEncodable(String(message));
   const m = Buffer.isBuffer(message) ? message : Buffer.from(String(message), 'utf8');
   return nodeSign(null, m, ed25519PrivateKey(seedHex));
 }
@@ -666,6 +746,7 @@ export function verifyBytes(publicRaw, signature, message) {
   try {
     if (!Buffer.isBuffer(publicRaw) || publicRaw.length !== 32) return false;
     if (!Buffer.isBuffer(signature) || signature.length !== 64) return false;
+    if (!Buffer.isBuffer(message)) assertEncodable(String(message));   // same as signBytes
     const m = Buffer.isBuffer(message) ? message : Buffer.from(String(message), 'utf8');
     return nodeVerify(null, m, ed25519PublicKey(publicRaw), signature);
   } catch {
@@ -790,8 +871,8 @@ export function verifyEnvelopeSignature(fields, opts = {}) {
     if (!fields.from || !fields.sig || typeof fields.to !== 'string') return false;
     const payload = signingPayload(fields);
     assertEncodable(payload);
-    const sig = Buffer.from(String(fields.sig), 'base64');
-    if (sig.length !== 64) return false;
+    const sig = strictB64(fields.sig);
+    if (sig === null || sig.length !== 64) return false;
     // Payload `from` stays the root DID. `signerDid` is the verifying key when the
     // sender enrolled a delegated op-key (T142 A2); omitted → `from` (the un-enrolled
     // / this-door-reply case).
@@ -816,17 +897,22 @@ export function verifyEnvelopeSignature(fields, opts = {}) {
  *      (agent/inbox.verify -> WRONG_RECIPIENT).
  *
  * A module-level function has no "me", so the recipient must be NAMED by the caller —
- * `verifyEnvelope(fields, { recipientDid })`, or `recipientDid` on the fields object.
- * An unnamed recipient is UNKNOWN, and unknown fails closed: an envelope nobody claims
- * cannot be verified as theirs. When you deliberately want question 1 alone (auditing a
- * stored message, say), call `verifyEnvelopeSignature`.
+ * `verifyEnvelope(fields, { recipientDid })`. THE WIRE CANNOT NAME ITS OWN RECIPIENT.
+ * `fields` is the stranger's object; `recipientDid` is not one of the six signed fields,
+ * so a fallback that read it from there let the message answer question 2 itself: an
+ * envelope captured on its way to one door replayed at ANY other door by adding one
+ * unsigned `recipientDid` equal to its own `to`, and the check that exists to say "this
+ * is my mail" said nothing. Only the verifier knows who it is. An unnamed recipient is
+ * UNKNOWN, and unknown fails closed: an envelope nobody claims cannot be verified as
+ * theirs. When you deliberately want question 1 alone (auditing a stored message, say),
+ * call `verifyEnvelopeSignature`.
  *
  * Never throws.
  */
 export function verifyEnvelope(fields, opts = {}) {
   try {
     if (!fields || typeof fields !== 'object') return false;
-    const recipient = opts.recipientDid ?? opts.me ?? fields.recipientDid ?? null;
+    const recipient = opts.recipientDid ?? opts.me ?? null;
     if (typeof recipient !== 'string' || !recipient) return false;
     if (fields.to !== recipient) return false;
     return verifyEnvelopeSignature(fields, opts);
@@ -842,7 +928,8 @@ export function verifyEnvelope(fields, opts = {}) {
 // used to verify under `from` only, which refused every default-enrolled
 // visitor. Resolve the op-key from a valid inline KeyState (root-signed, pin
 // to the claimed `from`); a missing or invalid record falls back to `from`.
-// No directory, no pin store — first-contact, same as the Python twin.
+// No directory. The pin store is the CALLER's — `resolveOpDid(..., { pinned })`;
+// with none this is first contact and revocation is unenforceable (read why there).
 
 const KEYSTATE_TYP = 'muretai/keystate/1';
 // Lockstep with shared/keystate._FIELDS_V1 / _signed_names: presence of
@@ -872,13 +959,20 @@ export function verifyKeystate(ks, expectedRootDid, now) {
     if (expectedRootDid != null && rootDid !== expectedRootDid) return false;
     const didKey = publicKeyHexFromDid(rootDid);
     if (ks.rootKey !== didKey) return false;
-    const sig = Buffer.from(String(ks.sig), 'base64');
-    if (sig.length !== 64) return false;
+    const sig = strictB64(ks.sig);
+    if (sig === null || sig.length !== 64) return false;
     const payloadObj = {};
     for (const k of keystateSignedNames(ks)) {
       payloadObj[k] = ks[k] === undefined ? null : ks[k];
     }
     const payload = canonicalJSON(payloadObj);
+    // The one canonical payload in this file that reached `Buffer.from(…, 'utf8')` unguarded.
+    // A KeyState is attacker-supplied and its signed names are copied straight off it, so a
+    // lone surrogate anywhere in `opDid`/`rootNextHash`/… would have been encoded as U+FFFD
+    // and verified against bytes the root never signed, while the Python twin raises on the
+    // very same record. It throws; the enclosing try answers false, which is this function's
+    // only refusal — a KeyState nobody can encode identically is not a valid KeyState.
+    assertEncodable(payload);
     const pub = Buffer.from(String(ks.rootKey), 'hex');
     if (pub.length !== 32) return false;
     if (!verifyBytes(pub, sig, Buffer.from(payload, 'utf8'))) return false;
@@ -894,15 +988,120 @@ export function verifyKeystate(ks, expectedRootDid, now) {
   }
 }
 
-export function resolveOpDid(rootDid, inlineKeystate, now) {
-  if (inlineKeystate && verifyKeystate(inlineKeystate, rootDid, now)) {
-    const burned = Array.isArray(inlineKeystate.revokedOps)
-      ? inlineKeystate.revokedOps : [];
-    const op = inlineKeystate.opDid || rootDid;
-    if (burned.includes(op)) return rootDid;
-    return op;
+/** Is `opDid` in this record's burn list? The list is an ARRAY of DIDs, and a `revokedOps`
+ *  that is not one burns nothing here. shared/keystate.op_is_revoked runs Python's `in`
+ *  against whatever it finds instead, so on a root-signed `revokedOps: "did:key:zABC…"` that
+ *  is a SUBSTRING test (every op whose DID is a substring of it reads as burned) and on a
+ *  `revokedOps: 5` it raises TypeError out through `resolve_op_did`, which catches nothing.
+ *  Both records are malformed either way and no honest signer mints one; this side keeps the
+ *  type check because a burn list you cannot enumerate is not a burn list, and because a
+ *  resolver that throws is a resolver a stranger can turn off. */
+function keystateBurnsOp(ks, opDid) {
+  return !!ks && Array.isArray(ks.revokedOps) && ks.revokedOps.includes(opDid);
+}
+
+/**
+ * WHICH KEY does this message's signature get checked against — the root DID in `from`, or a
+ * delegated op-key its sender enrolled while `from` stayed the root?
+ *
+ * Called with THREE arguments this is first contact, and it answers exactly what it has
+ * always answered: a root-signed inline KeyState names the op-key; a missing, expired,
+ * wrong-root or unparseable one falls back to `from`. Read the next paragraph before you
+ * rely on that.
+ *
+ * WITHOUT A PIN, `revokedOps` IS UNENFORCEABLE — and until this comment nothing in this file
+ * admitted it, so a caller reading the old one would reasonably believe the revocation list
+ * did something. It does not. The list is read off the very record being judged, and that
+ * record is the SENDER's: root-signed, therefore authentic, but authenticity is not
+ * freshness. A thief holding a burned op-key attaches an OLDER, still-validly-signed KeyState
+ * in which that key is not yet revoked, and this function honours it. The list can only ever
+ * incriminate a key its own presenter chose to incriminate. The same missing memory costs two
+ * more: a record at a LOWER `epoch` than one already seen is accepted as readily as a higher
+ * one, so rollback is free; and two records at the SAME epoch naming different `opDid`s are
+ * both acceptable, so a fork is invisible. Three findings, one bug — the resolver remembers
+ * nothing about this root.
+ *
+ * `opts.pinned` IS that memory: a KeyState for this same root that the CALLER kept from an
+ * earlier, verified contact. Given one, this becomes a ratchet, mirroring
+ * shared/keystate.resolve_op_did rather than inventing a second policy for the same wire:
+ *
+ *   - THE PIN IS VERIFIED BEFORE IT IS TRUSTED (`verifyKeystate` against `rootDid`). A pin
+ *     that does not verify is not a pin. A pin that was SUPPLIED and does not verify is a
+ *     broken store — not a first contact — so it fails closed to the root rather than
+ *     silently degrading to the unpinned answer this whole parameter exists to end; `null` /
+ *     `undefined` is the honest "no record yet" and keeps that answer. The validity WINDOW is
+ *     deliberately NOT applied to the pin: `notAfter` says a record may no longer authorize a
+ *     key, not that we never saw it, and expiring the pin would hand the thief his replay
+ *     back on a clock.
+ *   - AN INLINE RECORD DISPLACES THE PIN ONLY AT A STRICTLY GREATER EPOCH. Equal is not an
+ *     upgrade, it is a fork — two histories at one epoch — and the one we verified ourselves
+ *     is the one we keep. (Measured on the Python side 2026-08-11: pinned epoch 1 -> op1, a
+ *     replayed epoch-1 record naming op0 resolved to op0.) Identical content makes `>` and
+ *     `>=` the same no-op; differing content is exactly when it matters.
+ *   - AND ONLY UNDER THE SAME `rootKey`. `rootKey` is what authorizes a KeyState, and a
+ *     genesis key authorizes one at ANY epoch, so a record signed by a STOLEN GENESIS key
+ *     out-epochs an already-pinned root-rotated one. No lineage travels inline (there is no
+ *     wire field for one), so an inline record may advance the epoch under the root key we
+ *     already hold and never change it; a genuine root rotation arrives through a pull and a
+ *     fresh pin. Here the test is belt-and-braces — `verifyKeystate` pins `rootKey` to the
+ *     DID's own key, so two records that both verify against one `rootDid` cannot differ —
+ *     and it stays because it is the rule, not because today's did:key makes it free.
+ *   - THE PIN'S `revokedOps` BINDS, AND SO DOES THE INLINE ONE: the UNION, not the pin alone.
+ *     The pin's half is the half with teeth, because the stranger did not choose it. The
+ *     inline half is honoured too and costs nothing: a key the presenter's OWN record calls
+ *     dead is dead by admission, and an attacker who dislikes that entry simply omits it —
+ *     which leaves him exactly where the pin already had him. A burned answer falls back to
+ *     the key the pin still stands behind, and to the root if that one is burned too.
+ *
+ * The parameter is where this stops. GIVING THE DOOR A PIN STORE IS A SEPARATE, DELIBERATE
+ * FOLLOW-UP: the seam exposes the argument and fixes the policy, `@muretai/agent-entry`
+ * supplies the memory — what it keys the store by, when it writes, and what an operator sees
+ * when a peer's epoch walks backwards are its decisions, not the wire's. Until it does, every
+ * door calling this with three arguments is on the first-contact answer above, revocation and
+ * all, and should say so rather than believe otherwise.
+ *
+ * Hence the shape: a FOURTH parameter, defaulted — never a changed signature. The door
+ * splices this region into its own single file verbatim and calls `resolveOpDid(from,
+ * meta.keystate, ts)`; its conformance twin compares the spliced DEFINITION and never the
+ * call site. A breaking signature would therefore land a new definition beside an unchanged
+ * three-argument call — the timestamp read as a pinned KeyState, `now` undefined, the
+ * validity window quietly no longer checked — and every test in both repositories would stay
+ * green. With no pin the answer here is what it was before this paragraph existed, case for
+ * case.
+ *
+ * Never throws.
+ */
+export function resolveOpDid(rootDid, inlineKeystate, now, opts = {}) {
+  // `opts` is read totally: a primitive, null, or a caller who passed nothing all read as
+  // "no pin", which is the three-argument path.
+  const claimedPin = opts == null ? null : opts.pinned;
+  if (claimedPin != null && !verifyKeystate(claimedPin, rootDid)) return rootDid;
+  const pin = claimedPin == null ? null : claimedPin;
+  const inline = (inlineKeystate && verifyKeystate(inlineKeystate, rootDid, now))
+    ? inlineKeystate : null;
+
+  // Adoption. With no pin every verifying inline record is "current" — that IS first contact.
+  let current = pin;
+  if (inline !== null
+      && (pin === null || (inline.rootKey === pin.rootKey && inline.epoch > pin.epoch))) {
+    current = inline;
   }
-  return rootDid;
+
+  const op = current === null ? rootDid : (current.opDid || rootDid);
+  // The PIN's list first — the half the stranger did not choose. A key it burns falls back to
+  // the key the pin does still stand behind, not to the root: the pin is a verified record of
+  // this identity and its own op is the best thing in the room.
+  if (pin !== null && keystateBurnsOp(pin, op)) {
+    const held = pin.opDid || rootDid;
+    // shared/keystate.resolve_op_did returns `held` unconditionally here, so a pin that burns
+    // its OWN opDid resolves there to the key it has just declared dead. Re-test it; nobody
+    // vouched for anything, and the root is the only honest answer left.
+    return keystateBurnsOp(pin, held) ? rootDid : held;
+  }
+  // Then the record we actually resolved through. With no pin this IS the whole revocation
+  // check, and it is the unenforceable one — see the second paragraph above.
+  if (current !== null && keystateBurnsOp(current, op)) return rootDid;
+  return op;
 }
 
 // ================================================================ Web Bot Auth (RFC 9421 subset, verify-only) — T107
@@ -1169,16 +1368,16 @@ function wbaHeaderGet(headers, name) {
 }
 
 /** The 32 raw key bytes of an Ed25519 OKP JWK, or null — the strict gate every
- *  untrusted key passes through (mirrors shared/webbotauth.public_from_jwk). */
+ *  untrusted key passes through (mirrors shared/webbotauth.public_from_jwk). `x` goes
+ *  through `strictB64Url`, so ONE key has ONE `x`: the alphabet test this line used to
+ *  carry left the four spellings the last character's two unread bits allow. The 32-byte
+ *  length is checked HERE and not in the codec — this is where it is known what a key is. */
 function wbaPublicFromJwk(jwk) {
   try {
     if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk)) return null;
     if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519') return null;
-    const x = jwk.x;
-    if (typeof x !== 'string') return null;
-    if (!WBA_B64URL.test(x) || x.length % 4 === 1) return null;
-    const raw = Buffer.from(x, 'base64url');
-    return raw.length === 32 ? raw : null;
+    const raw = strictB64Url(jwk.x);
+    return raw !== null && raw.length === 32 ? raw : null;
   } catch {
     return null;
   }
@@ -1305,6 +1504,11 @@ export const BINDING_V2_TYP = 'muretai/devicebinding/2';
 const P256_SPKI_PREFIX = Buffer.from(
   '3039301306072a8648ce3d020106082a8648ce3d030107032200', 'hex');
 
+/** The longest ASN.1 DER an ECDSA-P-256 signature can be: SEQUENCE(2+) of two INTEGERs each
+ *  at most 33 bytes of content (32 + the 0x00 a high bit forces) plus 2 bytes of tag+length.
+ *  A ceiling, not an equality, because r and s shrink when they have leading zero bytes. */
+const MAX_P256_DER_SIG_BYTES = 72;
+
 /** did:key → { curve, key }: ('ed25519', 32-byte pubkey) or ('p256', 33-byte compressed
  *  point). Curve-agnostic sibling of `publicKeyFromDid` (which is ed25519-only, for the
  *  message envelope that is always ed25519). Throws on anything else. */
@@ -1377,8 +1581,23 @@ export function verifyDeviceBindingV2(binding, { now = null, expectedDeviceDid =
     if (!Number.isSafeInteger(ts) || !Number.isSafeInteger(validUntil)) return false;
     if (expectedDeviceDid !== null && deviceDid !== expectedDeviceDid) return false;
     if (now !== null && validUntil !== 0 && now > validUntil) return false;
-    const sig = Buffer.from(String(binding.sig ?? ''), 'base64');
-    const deviceSig = Buffer.from(String(binding.deviceSig ?? ''), 'base64');
+    const sig = strictB64(binding.sig);
+    const deviceSig = strictB64(binding.deviceSig);
+    if (sig === null || deviceSig === null) return false;
+    // Every other signature site here bounds its decoded length before handing the bytes to a
+    // verifier; these two did not, and they are the last attacker-controlled byte strings in
+    // this function. The DEVICE is always ed25519, so its countersignature is exactly 64
+    // bytes and anything else is not a countersignature. The OWNER is the one signature in
+    // the file that is NOT always 64: `p256Verify` above deliberately accepts both encodings
+    // a p256 client emits — raw r||s (64) and ASN.1 DER from a Secure Enclave / WebAuthn
+    // (~70-72) — so an equality here would silently refuse every Secure Enclave owner the
+    // Python twin still accepts. The bound is therefore per curve, read from the owner's own
+    // did:key (junk there throws, and the enclosing try answers false).
+    if (deviceSig.length !== 64) return false;
+    const ownerCurve = decodeDidKey(rootDid).curve;
+    if (ownerCurve === 'ed25519' ? sig.length !== 64 : sig.length > MAX_P256_DER_SIG_BYTES) {
+      return false;
+    }
     const payload = bindingV2Payload(rootDid, deviceDid, ts, validUntil);
     return verifyDidSig(rootDid, sig, payload) && verifyDidSig(deviceDid, deviceSig, payload);
   } catch {
@@ -1420,8 +1639,8 @@ export function verifyCardEnvelope(envelope, expectedDid = null) {
     const { card, ts, sig } = envelope;
     if (!card || typeof card !== 'object' || !card.did || sig == null || ts == null) return null;
     if (expectedDid !== null && card.did !== expectedDid) return null;
-    const raw = Buffer.from(String(sig), 'base64');
-    if (raw.length !== 64) return null;
+    const raw = strictB64(sig);
+    if (raw === null || raw.length !== 64) return null;
     const payload = cardEnvelopePayload(card, ts);
     assertEncodable(payload);
     return verifyBytes(publicKeyFromDid(card.did), raw, Buffer.from(payload, 'utf8'))
@@ -1478,12 +1697,37 @@ function boxKey(seedHex, theirPubHex) {
   return Buffer.from(hkdfSync('sha256', shared, BOX_SALT, BOX_INFO, 32));
 }
 
+/** The bytes an argument MEANT, or a TypeError naming it. `Buffer.from(String(x), 'utf8')`
+ *  stood here, and `String()` has an answer for everything: an object becomes
+ *  "[object Object]", an array its comma-joined elements, `null` "null", `undefined`
+ *  "undefined". A caller who passed the wrong shape — the parsed message where its encoded
+ *  body belonged, an array of contextIds as associated data — got a perfectly well-formed
+ *  box bound to meaningless AAD, and DIFFERENT values collided onto the SAME AAD, which is
+ *  the one thing associated data exists to prevent: `{a:1}` and `{b:2}` both bind
+ *  "[object Object]", so each opens the other's box. A wrong type here is a bug in the
+ *  caller, not a message from a stranger, and it is worth a throw. A string is encoded
+ *  UTF-8 through `assertEncodable` for the reason `signBytes` does: a lone surrogate
+ *  would be sealed as U+FFFD, so the recipient decrypts text the sender never wrote and the
+ *  Python twin (which takes bytes) could not have produced those bytes at all. Absent still
+ *  means "no associated data" — what the `= Buffer.alloc(0)` defaults promise. */
+function bytesArg(value, name) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value === null || value === undefined) return Buffer.alloc(0);
+  if (typeof value === 'string') { assertEncodable(value); return Buffer.from(value, 'utf8'); }
+  throw new TypeError(
+    `${name} must be a Buffer, Uint8Array, string, or null/undefined for none `
+    + `(got ${Array.isArray(value) ? 'array' : typeof value})`);
+}
+
 /** Encrypt to the holder of `theirPubHex`. Returns base64(nonce || ciphertext || tag).
  *  A fresh random nonce per call, so the output is never reproducible — which is why the
  *  wire vectors pin only the OPEN direction. */
 export function seal(seedHex, theirPubHex, plaintext, ad = Buffer.alloc(0)) {
-  const pt = Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(String(plaintext), 'utf8');
-  const aad = Buffer.isBuffer(ad) ? ad : Buffer.from(String(ad), 'utf8');
+  const pt = bytesArg(plaintext, 'seal: plaintext');
+  const aad = bytesArg(ad, 'seal: ad');
   const nonce = randomBytes(NONCE_BYTES);
   const cipher = createCipheriv('chacha20-poly1305', boxKey(seedHex, theirPubHex), nonce,
     { authTagLength: TAG_BYTES });
@@ -1496,13 +1740,18 @@ export function seal(seedHex, theirPubHex, plaintext, ad = Buffer.alloc(0)) {
  *  (bad base64, truncated blob, wrong key, AD mismatch, auth-tag failure) — the caller's
  *  verification path stays branch-simple, exactly like shared/cryptobox.open_box. */
 export function openBox(seedHex, theirPubHex, blobB64, ad = Buffer.alloc(0)) {
+  // The `ad` guard sits ABOVE the try ON PURPOSE. Everything inside answers with null —
+  // that is the contract, and it is right for a stranger's blob. But a wrong-typed `ad` is
+  // not a cryptographic failure, it is a programming error in THIS process, and letting the
+  // catch swallow it would teach the caller "wrong key or tampered box" when the truth is
+  // "you passed an object". Loud for our own bug, quiet for the stranger's.
+  const aad = bytesArg(ad, 'openBox: ad');
   try {
     const raw = Buffer.from(String(blobB64), 'base64');
     if (raw.length < NONCE_BYTES + TAG_BYTES) return null;
     const nonce = raw.subarray(0, NONCE_BYTES);
     const ct = raw.subarray(NONCE_BYTES, raw.length - TAG_BYTES);
     const tag = raw.subarray(raw.length - TAG_BYTES);
-    const aad = Buffer.isBuffer(ad) ? ad : Buffer.from(String(ad), 'utf8');
     const decipher = createDecipheriv('chacha20-poly1305', boxKey(seedHex, theirPubHex), nonce,
       { authTagLength: TAG_BYTES });
     decipher.setAuthTag(tag);

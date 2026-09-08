@@ -108,6 +108,39 @@ export const SIGNED_RATE_PER_MIN_TOTAL = 600;
  *  Must match `MAX_CARD_DOMAINS` in examples/agent_entry_reference.py. */
 export const MAX_CARD_DOMAINS = 5;
 
+/** Ceiling on `messageId`, in UTF-8 BYTES. It is the REPLAY TABLE'S KEY and the table keeps
+ *  20000 of them for REPLAY_TTL_S, so an id nobody bounds is a memory bound nobody set.
+ *  Measured against the unbounded gate: 200 requests carrying an id sized to the 1 MiB body
+ *  ceiling cost +199.9 MiB of heap, and 1500 with fresh sender DIDs cost +1500.2 MiB — 900 of
+ *  those answered -32004 and charged for anyway. 20000 x ~1 MiB is ~19 GB: the process is out
+ *  of memory long before the table's own cap is the thing that stops it.
+ *
+ *  WHY 256. A uuid4 hex (`newId()` here, `new_id()` in the Python reference) is 32 characters,
+ *  a canonical UUID 36, the conformance vectors carry `m1` and `m-群`, and the longest id
+ *  anything in this house mints is receptor-check's `receptor-dup-<32 hex>` at 45. 256 leaves
+ *  several times the room a DID-prefixed or namespaced id needs (`did:key:z6Mk…` is ~56) while
+ *  20000 of them come to 5 MiB — a worst case a reader can hold in their head.
+ *
+ *  BYTES, NOT CHARACTERS, for the reason MAX_TEXT_BYTES gives and one more: `.length` counts
+ *  UTF-16 code units in JavaScript, code points in Python and bytes in PHP's `strlen`, so "256
+ *  characters" is three different limits and an id of astral characters would be accepted by
+ *  one implementation and refused by another. UTF-8 byte length is the one number all of them
+ *  compute identically.
+ *
+ *  A DOOR-LOCAL RULE TODAY, stated rather than hidden. The seam pins MAX_TEXT_BYTES and
+ *  MAX_BODY_BYTES and not this, so until an upstream agent-seam release adds it beside them
+ *  the Python reference still accepts an id this door refuses — a divergence chosen knowingly,
+ *  because the alternative is an out-of-memory, and it errs towards refusing. It arguably
+ *  belongs in those pinned declarations; it cannot be put there from here, because that region
+ *  is a byte-for-byte copy of agent-seam (see conformance/seam-twin.mjs) and moving a line into
+ *  it needs an upstream release, not a local edit.
+ *
+ *  The store adapters meet the same input downstream and hash it to a fixed width for it
+ *  (agent-entry-wordpress includes/class-wpdb-store.php, agent-entry-serverless
+ *  workers/src/store.mjs). A hash bounds the KEY; it does not bound the REQUEST, so the gate
+ *  still has to. */
+export const MAX_MESSAGE_ID_BYTES = 256;
+
 export const AGENT_CARD_PATH = '/.well-known/agent-card.json';
 export const AGENT_CARD_PATH_LEGACY = '/.well-known/agent.json';
 export const AGENT_CARD_SIG_PATH = '/.well-known/agent-card.sig.json';
@@ -599,6 +632,49 @@ export function canonicalBytes(value) {
   const s = canonicalJSON(value);
   assertEncodable(s);
   return Buffer.from(s, 'utf8');
+}
+
+/** `fatal: true` refuses invalid UTF-8 instead of substituting U+FFFD. `ignoreBOM: true` does
+ *  NOT mean "ignore a BOM" — it means "do not STRIP one", which is the half that matters, and
+ *  the flag's name has cost this family a day before. The default decoder silently removes a
+ *  leading U+FEFF, so `EF BB BF {"a":1}` parsed cleanly here and was refused by Go and Rust:
+ *  the same bytes, conformant on two references and not on the other two. */
+const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** The five byte order marks, longest first — UTF-32-LE's begins with UTF-16-LE's. */
+const JSON_BOMS = [[0x00, 0x00, 0xfe, 0xff], [0xff, 0xfe, 0x00, 0x00],
+  [0xef, 0xbb, 0xbf], [0xfe, 0xff], [0xff, 0xfe]];
+
+/**
+ * Raw document BYTES in, the exact bytes to sign out — the whole supported path for a document
+ * read off a wire, and the twin of Go's `seam.CanonicalFromJSON`, Rust's
+ * `serde_json::from_slice` + `canonical`, and Python's `crypto.canonical_from_json`.
+ *
+ * THREE DOORS, AND EACH ONE IS LOAD-BEARING. The BOM check below, because RFC 8259 §8.1 says a
+ * networked JSON text carries no byte order mark and because stripping one makes
+ * `EF BB BF {"a":1}` and `{"a":1}` — two distinct wire documents — sign ONE byte string, which
+ * is the lone-surrogate collision of 0.3.0 wearing a different hat: content substitution under
+ * a signature that verifies. The fatal decode, because `Buffer.toString('utf8')` REPAIRS an
+ * invalid byte to U+FFFD, and U+FFFD is a character this reference encodes happily, so the
+ * evidence is gone one line before the bytes get signed. And `assertEncodable` inside
+ * `canonicalBytes`, because a lone surrogate can ride as a `\ud800` ESCAPE — pure ASCII, which
+ * no decoder can see.
+ *
+ * Callers used to be told to assemble this themselves ("a fatal TextDecoder, then
+ * canonicalBytes"), and a recipe in a document is not a guard: the one caller who reaches for
+ * the default decoder gets a boundary that repairs, and nothing anywhere says so.
+ */
+export function canonicalFromJSON(raw) {
+  const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  for (const bom of JSON_BOMS) {
+    if (bytes.length >= bom.length && bom.every((b, i) => bytes[i] === b)) {
+      throw new SyntaxError(
+        `json: document begins with a byte order mark (${Buffer.from(bom).toString('hex')}) — `
+        + 'RFC 8259 §8.1 forbids one, and stripping it makes two distinct documents sign one '
+        + 'byte string');
+    }
+  }
+  return canonicalBytes(JSON.parse(UTF8_STRICT.decode(bytes)));
 }
 
 /** Refuse lone surrogates. Python's `.encode("utf-8")` RAISES on them; Node silently
@@ -1938,6 +2014,46 @@ class AccountRateBounds {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
+ * A `messageId` that is only whitespace is not an id — on either implementation.
+ *
+ * This gate used to refuse the empty string and nothing else, while the Python reference
+ * builds every message through `shared/protocol.message_id_ok`, which is
+ * `isinstance(x, str) and bool(x.strip())`. So `"   "`, `"\t"` and `"\n"` bought a signed
+ * reply and a customer ledger row HERE and a -32600 THERE: the same wire bytes, two verdicts,
+ * which is the exact class this gate exists to close. The door adopts Python's rule.
+ *
+ * THE RULE, written so a third implementation can match it character for character: refuse
+ * the id when it is not a string, or when EVERY code point in it is one of these 29 — the
+ * set Python's `str.strip()` removes, i.e. the code points whose `str.isspace()` is true:
+ *
+ *   U+0009 U+000A U+000B U+000C U+000D    tab, LF, VT, FF, CR
+ *   U+001C U+001D U+001E U+001F           file / group / record / unit separator
+ *   U+0020 U+0085 U+00A0 U+1680
+ *   U+2000 … U+200A   U+2028 U+2029 U+202F U+205F U+3000
+ *
+ * WRITTEN OUT RATHER THAN `String.prototype.trim()`, because trim() is not that set and the
+ * gap is reachable on this wire — a JSON body spells any of them with a \u escape. Enumerated
+ * across all of Unicode against both runtimes rather than assumed:
+ *   Python strips, JS trim() does NOT:  U+001C U+001D U+001E U+001F U+0085
+ *   JS trim() strips, Python does NOT:  U+FEFF
+ * `trim()` alone would therefore ACCEPT `"\u0085"`, which Python refuses, and REFUSE
+ * `"\uFEFF"`, which Python accepts — one fresh divergence in each direction, which is the
+ * bug being fixed, not a smaller version of it. U+200B (zero-width space) is in NEITHER set:
+ * both implementations take it as a perfectly good id, and that agreement is the point.
+ *
+ * WHERE THE TWO COULD STILL DIFFER. This is a literal set; Python's comes from the Unicode
+ * database its build carries. Were a future Unicode version to make some new code point
+ * `isspace()`, Python would strip it and this would not, so an id made only of that code
+ * point would be refused there and accepted here — the same direction as the bug above, one
+ * code point wide instead of the whole whitespace set. The set has been stable for many
+ * releases; if it moves, it moves here and in the seam together.
+ *
+ * No `u` flag, like LONE_SURROGATE above: every code point here is in the BMP, so matching by
+ * UTF-16 code unit is exact, and the two patterns stay the same kind of pattern.
+ */
+const BLANK_MESSAGE_ID = /^[\t\n\v\f\r\x1C-\x1F \x85\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]*$/;
+
+/**
  * The STRICT type check on the fields that end up inside the signed payload. Returns a
  * reason string, or null when the shape is acceptable.
  *
@@ -1980,7 +2096,24 @@ function wireShapeError(msg) {
       return 'a text part\'s `text` is not encodable UTF-8 (a lone surrogate)';
     }
   }
-  if (typeof msg.messageId !== 'string' || !msg.messageId) {
+  if (typeof msg.messageId !== 'string') {
+    return 'messageId must be a non-empty string';
+  }
+  // LENGTH FIRST, before any pattern runs over it. `messageId` is the replay table's KEY and
+  // was bounded only by the 1 MiB body, so a stranger could hand this door ~1 MiB of key per
+  // request and the table would hold it for REPLAY_TTL_S — measured at +199.9 MiB of heap over
+  // 200 requests, with the rate ceiling refusing most of them and charging for them anyway.
+  // This gate is where the refusal belongs: it is already the place a lone surrogate is
+  // refused, i.e. the place this door says what a `messageId` may BE. See MAX_MESSAGE_ID_BYTES
+  // for the number, why it is in bytes, and why it is not (yet) one of the seam's pinned
+  // declarations.
+  if (Buffer.byteLength(msg.messageId, 'utf8') > MAX_MESSAGE_ID_BYTES) {
+    return `messageId is over the ${MAX_MESSAGE_ID_BYTES}-byte limit`;
+  }
+  // Empty, or whitespace only. The reason string is Python's own sentence, because
+  // `message_id_ok` refuses exactly this input with exactly this meaning — see
+  // BLANK_MESSAGE_ID for the code points and for what `.strip()` and `.trim()` disagree about.
+  if (BLANK_MESSAGE_ID.test(msg.messageId)) {
     return 'messageId must be a non-empty string';
   }
   if (LONE_SURROGATE.test(msg.messageId)) {
@@ -3577,53 +3710,75 @@ export function createAgentEntry({
     if (!verifyEnvelope(fields, { recipientDid: did, signerDid })) {
       return rpcError(reqId, ERRORS.UNAUTHENTICATED, 'signature does not match');
     }
-    // 8. duplicate messageId inside the replay window — AFTER the verify, and the ORDER is the
-    //    property. The table is state an authenticated sender depends on, so a caller who has
-    //    proved nothing must not write into it. Ahead of the verify a stranger could BURN an id
-    //    its real sender was about to use, and because the table is capped and evicts
-    //    oldest-first, flood past the cap to discard genuine entries and re-open real messages
-    //    to replay — invalid signatures are not rate-limited, so that flood is free. This is the
-    //    rule the signed lane's ceiling already follows one step below, for the same reason; it
-    //    was simply never applied here. The cost of the swap is one Ed25519 verify spent on a
-    //    replayed VALID message, which an attacker must first have obtained.
-    return then1(state.seenMessage(messageId, REPLAY_TTL_S), (fresh) => {
-      if (!fresh) {
-        return rpcError(reqId, ERRORS.REPLAY_REJECTED, 'duplicate messageId (replay) detected');
+    // 8. T102 account layer. An OPTIONAL countersigned v2 binding collapses an owner's
+    //    device DIDs to ONE account; a present-but-INVALID binding fails closed with the
+    //    SAME UNAUTHENTICATED code (never a silent downgrade to unbound). Absent → the
+    //    device DID.
+    return then1(resolveAccount(meta.binding, from), (acct) => {
+      if (!acct.ok) return rpcError(reqId, ERRORS.UNAUTHENTICATED, acct.reason);
+      const account = acct.account;
+      const ownerDid = account !== from ? account : null;
+
+      // 9. THE SIGNED LANE'S CEILING. Here and not earlier: before the signature a
+      //    stranger could spend somebody else's budget by naming them, and before
+      //    `resolveAccount` an owner's devices would each get their own. Here and not
+      //    later: a refused flood must grow neither the ledger, nor the REPLAY TABLE one
+      //    step below, nor whatever the responder costs.
+      //    PER-ACCOUNT FIRST, deliberately — one loud peer is then stopped by ITS OWN
+      //    window without drawing down the shared one, so it cannot starve everybody
+      //    else on its way to being refused. Neither refusal names its ceiling: a
+      //    published number is a calibration table telling a flood exactly how many keys
+      //    to mint.
+      //
+      //    These two bounds stay IN PROCESS even with an external store, and that is the
+      //    approved design rather than an omission: a ceiling that costs a store write
+      //    per request is its own denial of service, and losing a counter fails open for
+      //    one minute — bounded, unlike a lost replay set or a lost device pin. A
+      //    serverless deployment therefore gets its ceiling per instance; put a real one
+      //    at the edge if that matters.
+      if (signedAccountRate && !signedAccountRate.allow(account)) {
+        return rpcError(reqId, ERRORS.RATE_LIMITED,
+          'you are sending faster than this door answers — slow down and retry');
+      }
+      if (signedTotalRate && !signedTotalRate.allow()) {
+        return rpcError(reqId, ERRORS.RATE_LIMITED,
+          'this entry is at its ceiling right now — retry shortly');
       }
 
-      // 9. T102 account layer. An OPTIONAL countersigned v2 binding collapses an owner's
-      //    device DIDs to ONE account; a present-but-INVALID binding fails closed with the
-      //    SAME UNAUTHENTICATED code (never a silent downgrade to unbound). Absent → the
-      //    device DID.
-      return then1(resolveAccount(meta.binding, from), (acct) => {
-        if (!acct.ok) return rpcError(reqId, ERRORS.UNAUTHENTICATED, acct.reason);
-        const account = acct.account;
-        const ownerDid = account !== from ? account : null;
-
-        // 10. THE SIGNED LANE'S CEILING. Here and not earlier: before the signature a
-        //     stranger could spend somebody else's budget by naming them, and before
-        //     `resolveAccount` an owner's devices would each get their own. Here and not
-        //     later: a refused flood must grow neither the ledger nor whatever the
-        //     responder costs.
-        //     PER-ACCOUNT FIRST, deliberately — one loud peer is then stopped by ITS OWN
-        //     window without drawing down the shared one, so it cannot starve everybody
-        //     else on its way to being refused. Neither refusal names its ceiling: a
-        //     published number is a calibration table telling a flood exactly how many keys
-        //     to mint.
-        //
-        //     These two bounds stay IN PROCESS even with an external store, and that is the
-        //     approved design rather than an omission: a ceiling that costs a store write
-        //     per request is its own denial of service, and losing a counter fails open for
-        //     one minute — bounded, unlike a lost replay set or a lost device pin. A
-        //     serverless deployment therefore gets its ceiling per instance; put a real one
-        //     at the edge if that matters.
-        if (signedAccountRate && !signedAccountRate.allow(account)) {
-          return rpcError(reqId, ERRORS.RATE_LIMITED,
-            'you are sending faster than this door answers — slow down and retry');
-        }
-        if (signedTotalRate && !signedTotalRate.allow()) {
-          return rpcError(reqId, ERRORS.RATE_LIMITED,
-            'this entry is at its ceiling right now — retry shortly');
+      // 10. duplicate messageId inside the replay window — AFTER the verify AND after the
+      //     two ceilings above, and the ORDER is the property in both directions. The table
+      //     is state an authenticated sender depends on, so nobody who has proved nothing —
+      //     and nobody this door has just REFUSED — may write into it.
+      //
+      //     WHY AFTER THE VERIFY. Ahead of it a stranger could BURN an id its real sender
+      //     was about to use, and because the table is capped and evicts oldest-first, flood
+      //     past the cap to discard genuine entries and re-open real messages to replay —
+      //     invalid signatures are not rate-limited, so that flood is free.
+      //
+      //     WHY ALSO AFTER THE CEILINGS. Moving it past the verify closed the UNSIGNED flood
+      //     and left the SIGNED one open, and a did:key costs nothing to mint: 20001
+      //     correctly-signed messages with fresh ids and fresh senders evicted every genuine
+      //     entry, and 19401 of them (measured) had already been answered -32004 by the
+      //     ceiling above and had written their id anyway. 4 s of CPU, ~67 req/s over a
+      //     network — the ±300 s clock window is not a defence, and the replayed copy is a
+      //     genuinely signed order nothing downstream can tell from the first. A refusal that
+      //     still writes is not a refusal.
+      //
+      //     THE CEILINGS MOVED UP; the dedup was not given a token of its own, and the
+      //     difference matters. The per-account tier needs the T102-resolved account, so
+      //     charging the write separately would either bill the DEVICE did — splitting an
+      //     owner's devices into separate budgets, the one thing `resolveAccount` exists to
+      //     prevent — or bill twice and quietly halve a published ceiling. One request, one
+      //     token, one meaning.
+      //
+      //     WHAT THIS ORDER COSTS. One Ed25519 verify spent on a replayed VALID message
+      //     (which an attacker must first have obtained), and now also one `resolveAccount`
+      //     on that same replay: free when no binding is attached, and with one attached a
+      //     bounded signature check whose device pin the FIRST delivery already wrote, so
+      //     the replay re-reads it and writes nothing.
+      return then1(state.seenMessage(messageId, REPLAY_TTL_S), (fresh) => {
+        if (!fresh) {
+          return rpcError(reqId, ERRORS.REPLAY_REJECTED, 'duplicate messageId (replay) detected');
         }
 
         return then1(noteContact(account), () =>

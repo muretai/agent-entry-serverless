@@ -4,12 +4,14 @@
  *
  * The three template copies of muretai-agent-entry.mjs are not this repository's code: they
  * are @muretai/agent-entry's door, whose home is the agent-entry repository, plus ONE
- * transform of ours — patches/store-seam.patch, the `store` option and the `then1` ladder the
+ * transform of ours, if any. Until 1.11.0 that was patches/store-seam.patch, the `store` option
+ * and the `then1` ladder the
  * three store adapters depend on. This script is the only way the copies change:
  *
  *   1. read agent-entry at --ref (a tag or commit) with `git show`, so what is on disk in that
  *      checkout does not matter, only what is committed;
- *   2. apply patches/store-seam.patch to that door in a temp dir with `patch --forward`. If a
+ *   2. IF a patch file is present (none is, since 1.11.0 took the seam upstream), apply it to
+ *      that door in a temp dir with `patch --forward`. If a
  *      hunk does not apply, write NOTHING and print patch's own output: the seam is rebased by
  *      hand, in the patch — never in one template copy;
  *   3. write the result to the three template copies (tests/check-sync.mjs insists they stay
@@ -27,7 +29,7 @@
  *   node scripts/vendor.mjs --ref v1.12.0              # ../agent-entry, or $MURETAI_AGENT_ENTRY
  *   node scripts/vendor.mjs --ref <sha> --from /path
  *   node scripts/vendor.mjs --ref main --dry-run       # say what would change, write nothing
- *   node scripts/vendor.mjs --ref main --no-patch      # the door as-is, once the seam is upstream
+ *   node scripts/vendor.mjs --ref main --patch         # apply patches/store-seam.patch, and fail if it is not there
  */
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -53,11 +55,17 @@ const opt = (n) => { const i = args.indexOf(n); const v = args[i + 1]; return i 
 const ref = opt('--ref');
 const from = resolve(ROOT, opt('--from') || process.env.MURETAI_AGENT_ENTRY || '../agent-entry');
 const dry = args.includes('--dry-run');
-const noPatch = args.includes('--no-patch');
+// The door is vendored AS-IS by default: @muretai/agent-entry 1.11.0 took the store seam
+// upstream, so there is no difference left to carry (patches/README.md tells that story).
+// If a template ever needs one again, write it down as patches/store-seam.patch and it is
+// applied automatically; `--patch` demands one and fails if it is not there; `--no-patch`
+// forces the door through untouched even when a patch file exists.
+const wantPatch = args.includes('--patch');
+const noPatch = args.includes('--no-patch') || (!wantPatch && !existsSync(join(ROOT, PATCH)));
 
 const die = (msg, code = 2) => { console.error(`error: ${msg}`); process.exit(code); };
 const indent = (s) => `${s.trim().split('\n').map((l) => `    ${l}`).join('\n')}\n`;
-if (!ref) die('usage: node scripts/vendor.mjs --ref <tag|commit> [--from PATH] [--dry-run] [--no-patch]');
+if (!ref) die('usage: node scripts/vendor.mjs --ref <tag|commit> [--from PATH] [--dry-run] [--patch|--no-patch]');
 if (!existsSync(join(from, '.git'))) die(`no agent-entry checkout at ${from} (pass --from, or set MURETAI_AGENT_ENTRY)`);
 const git = (...a) => execFileSync('git', ['-C', from, ...a], { stdio: ['ignore', 'pipe', 'pipe'] });
 let commit;
@@ -78,7 +86,7 @@ let transform = null;
 let patchReport = 'no transform: the door as-is';
 if (!noPatch) {
   const patchPath = join(ROOT, PATCH);
-  if (!existsSync(patchPath)) die(`${PATCH} is missing — pass --no-patch to vendor the door as-is`);
+  if (!existsSync(patchPath)) die(`${PATCH} is missing, and --patch demands it. Drop the patch in, or vendor the door as-is (the default since the seam went upstream in 1.11.0).`);
   const tmp = mkdtempSync(join(tmpdir(), 'agent-entry-vendor-'));
   const work = join(tmp, SOURCE);
   const run = (a) => spawnSync('patch', a, { cwd: tmp, encoding: 'utf8' });

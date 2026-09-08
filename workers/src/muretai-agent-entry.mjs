@@ -1,6 +1,14 @@
+// SPDX-License-Identifier: MIT
 /**
- * web/agent-entry/muretai-agent-entry.mjs
+ * muretai-agent-entry.mjs
  * THE AGENT ENTRY — one dependency-free Node file that makes a website agent-reachable.
+ *
+ * THIS REPOSITORY IS WHERE THIS FILE LIVES. It used to be written in Muretai core
+ * (`web/agent-entry/`) and copied here for publishing, which made the package a mirror of a
+ * repository it claimed independence from. Since 2026-09-07 this is the home: the npm package
+ * is built from here, and Muretai core carries a pinned copy (`web/agent-entry/VENDOR.json`
+ * there) for its own front desk and its contract suite. Edit it here — except the crypto
+ * block, which is itself a pinned copy (below).
  *
  * Why this exists:
  *   Muretai's adoption bottleneck is that BOTH ends had to run a node. A site does not want
@@ -14,16 +22,28 @@
  * build step, no transpiler. Node 20+ (native ed25519 / x25519 / hkdfSync / chacha20-poly1305).
  *
  * THE BYTES ARE THE CONTRACT. Every signed payload here must be byte-identical to what
- * Python's `shared/crypto.canonical` produces, or the signature is unverifiable and the only
- * diagnostic anyone gets is "signature verification failed". The pinned bytes live in
- * `testdata/wire_vectors.json`; `test_agent_entry_contract.py` Part 3 re-derives all of them
- * through this file. If you change anything under CANONICAL JSON, run that suite first.
+ * every other implementation of the seam produces, or the signature is unverifiable and the
+ * only diagnostic anyone gets is "signature verification failed". The pinned bytes are
+ * agent-seam's golden vectors, vendored at `vendor/agent-seam/wire_vectors.json`; the door's
+ * subset, `conformance/vectors.json`, is DERIVED from them by `scripts/build-vectors.mjs`, and
+ * `conformance/run.mjs` re-derives it through this file. Muretai core re-derives the same
+ * bytes through its Python door. If you change anything under CANONICAL JSON, run `npm test`
+ * first — and then read the next paragraph, because you should not be changing it here.
+ *
+ * THE CRYPTO BLOCK IS A PINNED COPY. Everything between the CANONICAL JSON banner and the
+ * `reach-back through a relay` banner is the SEAM: the bytes a Swift, Kotlin, PHP or Rust
+ * implementation must reproduce, with nothing in them that decides anything. Their home is
+ * `js/seam.mjs` in the `agent-seam` repository (MIT, beside the vectors, a Python twin of the
+ * same layer and a specification of just those bytes). `scripts/vendor-seam.mjs` splices that
+ * block in here at one tagged commit and records it in `vendor/agent-seam/VENDOR.json`;
+ * `conformance/seam-twin.mjs` fails when this copy — or any of the constants it pins by name —
+ * drifts from it. The seam is edited THERE; this file carries it.
  *
  *   import { createAgentEntry } from './muretai-agent-entry.mjs';
  *   createAgentEntry({ seedHex, name: 'Example Studio', baseUrl: 'https://studio.example',
  *                    responder: (env) => `You said: ${env.text}` }).listen(8788);
  *
- * See examples/agent_entry_server.mjs for the ~50-line file a site actually copies.
+ * See examples/server.mjs for the ~50-line file a site actually copies.
  */
 
 import {
@@ -461,7 +481,7 @@ export const ERRORS = {
 //   json.dumps(obj, sort_keys=True, separators=(",",":"), ensure_ascii=False,
 //              allow_nan=False).encode("utf-8")
 //
-// The four traps, each pinned by a case in testdata/wire_vectors.json:
+// The four traps, each pinned by a case in the golden vectors (`wire_vectors.json`):
 //   1. KEY ORDER is by UNICODE CODE POINT. JavaScript's default string sort compares
 //      UTF-16 code UNITS, which disagrees for astral characters (U+1F600 sorts BEFORE
 //      U+FFFD by unit, AFTER it by code point). `codePointCompare` below is deliberate.
@@ -761,7 +781,7 @@ export function signEnvelope(seedHex, fields) {
 /** Question 1 ONLY: does `sig` verify under the key DERIVED FROM `from`, over the six
  *  fields? Total and fail-closed — a malformed DID, bad base64, unrenderable number or
  *  short signature all answer false rather than throwing. */
-export function verifyEnvelopeSignature(fields) {
+export function verifyEnvelopeSignature(fields, opts = {}) {
   try {
     if (!fields || typeof fields !== 'object') return false;
     // `from` (the key) and `sig` must be there; `to` may be the EMPTY STRING — that is how
@@ -772,7 +792,11 @@ export function verifyEnvelopeSignature(fields) {
     assertEncodable(payload);
     const sig = Buffer.from(String(fields.sig), 'base64');
     if (sig.length !== 64) return false;
-    return verifyBytes(publicKeyFromDid(fields.from), sig, Buffer.from(payload, 'utf8'));
+    // Payload `from` stays the root DID. `signerDid` is the verifying key when the
+    // sender enrolled a delegated op-key (T142 A2); omitted → `from` (the un-enrolled
+    // / this-door-reply case).
+    const signerDid = opts.signerDid || fields.from;
+    return verifyBytes(publicKeyFromDid(signerDid), sig, Buffer.from(payload, 'utf8'));
   } catch {
     return false;
   }
@@ -805,10 +829,80 @@ export function verifyEnvelope(fields, opts = {}) {
     const recipient = opts.recipientDid ?? opts.me ?? fields.recipientDid ?? null;
     if (typeof recipient !== 'string' || !recipient) return false;
     if (fields.to !== recipient) return false;
-    return verifyEnvelopeSignature(fields);
+    return verifyEnvelopeSignature(fields, opts);
   } catch {
     return false;
   }
+}
+
+// ================================================================ KeyState (inline op-key, T142 A2)
+//
+// A persisted muretai identity enrolls a genesis KeyState at birth and signs
+// messages with a delegated op-key while `from` stays the root DID. This door
+// used to verify under `from` only, which refused every default-enrolled
+// visitor. Resolve the op-key from a valid inline KeyState (root-signed, pin
+// to the claimed `from`); a missing or invalid record falls back to `from`.
+// No directory, no pin store — first-contact, same as the Python twin.
+
+const KEYSTATE_TYP = 'muretai/keystate/1';
+// Lockstep with shared/keystate._FIELDS_V1 / _signed_names: presence of
+// encPubPqHash (even "") selects the T142 list. A V1-only list made every
+// default-enrolled visitor fail verify and fall back to the root DID, so
+// the op-signed envelope was -32001 at this door only (Python twin accepted).
+const KEYSTATE_FIELDS_V1 = [
+  'typ', 'rootDid', 'epoch', 'rootKey', 'rootNextHash',
+  'opDid', 'opNextHash', 'encPub', 'encNextHash',
+  'guardiansHash', 'revokedOps', 'notBefore', 'notAfter', 'ts',
+];
+function keystateSignedNames(ks) {
+  if (ks && Object.prototype.hasOwnProperty.call(ks, 'encPubPqHash')) {
+    return KEYSTATE_FIELDS_V1.concat(['encPubPqHash']);
+  }
+  return KEYSTATE_FIELDS_V1;
+}
+const MAX_KEYSTATE_EPOCH = 2147483647; // 2**31 - 1, shared/keystate.MAX_EPOCH
+
+export function verifyKeystate(ks, expectedRootDid, now) {
+  try {
+    if (!ks || typeof ks !== 'object') return false;
+    if (ks.typ !== KEYSTATE_TYP) return false;
+    const rootDid = ks.rootDid;
+    const epoch = ks.epoch;
+    if (!Number.isInteger(epoch) || epoch < 0 || epoch > MAX_KEYSTATE_EPOCH) return false;
+    if (expectedRootDid != null && rootDid !== expectedRootDid) return false;
+    const didKey = publicKeyHexFromDid(rootDid);
+    if (ks.rootKey !== didKey) return false;
+    const sig = Buffer.from(String(ks.sig), 'base64');
+    if (sig.length !== 64) return false;
+    const payloadObj = {};
+    for (const k of keystateSignedNames(ks)) {
+      payloadObj[k] = ks[k] === undefined ? null : ks[k];
+    }
+    const payload = canonicalJSON(payloadObj);
+    const pub = Buffer.from(String(ks.rootKey), 'hex');
+    if (pub.length !== 32) return false;
+    if (!verifyBytes(pub, sig, Buffer.from(payload, 'utf8'))) return false;
+    if (now != null) {
+      const nb = ks.notBefore || 0;
+      const na = ks.notAfter;
+      if (now < nb) return false;
+      if (na != null && now > na) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveOpDid(rootDid, inlineKeystate, now) {
+  if (inlineKeystate && verifyKeystate(inlineKeystate, rootDid, now)) {
+    const burned = Array.isArray(inlineKeystate.revokedOps)
+      ? inlineKeystate.revokedOps : [];
+    const op = inlineKeystate.opDid || rootDid;
+    if (burned.includes(op)) return rootDid;
+    return op;
+  }
+  return rootDid;
 }
 
 // ================================================================ Web Bot Auth (RFC 9421 subset, verify-only) — T107
@@ -817,7 +911,7 @@ export function verifyEnvelope(fields, opts = {}) {
 // THIS request, for THIS authority, as a `web-bot-auth` request? It mirrors EXACTLY the
 // subset shared/webbotauth.py::verify_request implements — no more (content digests,
 // @query-param, per-item parameters and every other RFC 9421 feature are refused, not
-// ignored) and no less. The two are pinned to one fixture, testdata/wba_vectors.json:
+// ignored) and no less. The two are pinned to one fixture, `wba_vectors.json`:
 // a vector one twin accepts and the other refuses is a red suite. Verification is
 // BYTE-FAITHFUL, not canonical: the signature base is rebuilt from the RECEIVED
 // `@signature-params` text, so a peer who orders or spaces parameters differently still
@@ -1156,7 +1250,7 @@ function wbaEntryVerifies(entry, { keyid, publicRaw, authority, headers, now }) 
  *  directory document ({keys:[…]}) already established as trustworthy — who the keys
  *  belong to was decided before this was called (DECISION 2: keys are GIVEN, never
  *  fetched on the hot path). Mirrors shared/webbotauth.verify_request exactly;
- *  testdata/wba_vectors.json holds the two to one verdict per input. */
+ *  `wba_vectors.json` holds the two to one verdict per input. */
 export function wbaVerifyRequest(headers, { authority, jwks, now } = {}) {
   try {
     const entries = wbaParseSignatureHeaders(
@@ -1192,7 +1286,7 @@ export function wbaVerifyRequest(headers, { authority, jwks, now } = {}) {
 // The ACCOUNT layer: a message may carry a countersigned DeviceKeyBinding v2 in
 // metadata.binding proving its device DID belongs to an OWNER DID. This is the JS twin of
 // shared/keybinding.verify_device_binding_v2 + the agent entry's account resolution, byte-pinned
-// by testdata/wire_vectors.json `bindingV2`.
+// by the golden vectors' `bindingV2` group.
 //
 // Two signatures, over the SAME canonical bytes: the OWNER (root) signs, and the DEVICE
 // countersigns — the countersignature is what stops a foreign owner claiming someone else's
@@ -2081,7 +2175,7 @@ const LDH = new Set('abcdefghijklmnopqrstuvwxyz0123456789-');
  *  legal ":<port>" for the raw-input bound (shared/domainbind.MAX_DOMAIN_LEN). */
 const MAX_DOMAIN_LEN = 253;
 
-/** Exported because the RUNNER needs the same fold: `examples/agent_entry_server.mjs` decides
+/** Exported because the RUNNER needs the same fold: `examples/server.mjs` decides
  *  whether `AGENT_ENTRY_DOMAINS` is blank at all, and it used `trim()`. That is a different
  *  set from Python's `strip()` in BOTH directions, so one variable got two verdicts — a
  *  `\x1c` started the Python runner with no domains and made this one exit 2, and a BOM
@@ -2400,13 +2494,6 @@ export function canonicalMount(canonUrl, basePath) {
  *                  if you need a metric, send a salted, site-scoped digest and keep the DID
  *                  in your own store. This module ships no sink and names no vendor — the
  *                  slot is here so an adapter can live outside it.
- *   store          OPTIONAL duck-typed persistence (T105). Five methods, each may return a
- *                  value or a promise: `seenMessage`, `getAccount`, `putAccount`,
- *                  `getDeviceOwner`, `putDeviceOwner`. Absent, state stays in process.
- *                  A serverless instance keeps nothing between requests; without a store
- *                  the replay set, the device pins and the ledger reset on every cold start.
- *                  Validated at construction — a partial store throws rather than silently
- *                  disabling a security rule. Rate counters stay in-process on purpose.
  */
 export function createAgentEntry({
   seedHex,
@@ -3232,12 +3319,13 @@ export function createAgentEntry({
     if (!Number.isSafeInteger(ts) || Math.abs(nowEpoch() - ts) > CLOCK_WINDOW_S) {
       return rpcError(reqId, ERRORS.REPLAY_REJECTED, 'timestamp out of range (clock skew or replay)');
     }
-    // 7. the signature itself, under the key DERIVED FROM `from`. (`messageId`'s type was
-    //    settled by the shape gate: a non-string never reaches here on either implementation.)
+    // 7. the signature itself. Payload `from` is the root DID; the verifying key is
+    //    the delegated op-key when a valid inline KeyState is attached (T142 A2).
     const messageId = msg.messageId;
     const fields = { from, to, messageId, contextId: msg.contextId ?? null,
       timestamp: ts, text, sig };
-    if (!verifyEnvelope(fields, { recipientDid: did })) {
+    const signerDid = resolveOpDid(from, meta.keystate, ts);
+    if (!verifyEnvelope(fields, { recipientDid: did, signerDid })) {
       return rpcError(reqId, ERRORS.UNAUTHENTICATED, 'signature does not match');
     }
     // 8. duplicate messageId inside the replay window — AFTER the verify, and the ORDER is the

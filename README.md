@@ -140,7 +140,7 @@ netlify/     netlify.toml + netlify/functions/entry.mjs + lib/{handler,blob-stor
 tests/       check-live.mjs (judge a deployed door) · check-sync.mjs · check-vendor.mjs
              check-vercel-shape.mjs · serve-local.mjs (run a template's handler on plain Node)
 scripts/     vendor.mjs (pull the library from agent-entry at one commit, seam it, pin it)
-patches/     store-seam.patch (the `store` option, applied by vendor.mjs)
+patches/     retired — the `store` option is upstream since @muretai/agent-entry 1.11.0
 VENDOR.json  which upstream commit and version the three copies are, and their sha256
 ```
 
@@ -158,8 +158,8 @@ The price is three copies of the library, and the price of copies is drift, so
 MIT-licensed, vendored into each template by `scripts/vendor.mjs` so these templates deploy
 with no install step. `VENDOR.json` at the root says which version: the upstream commit, its
 package version and date, and the sha256 of each copy as written. Each copy is **that upstream
-door plus `patches/store-seam.patch`** — the `store` option these templates depend on — and
-`npm test` (`tests/check-vendor.mjs`) holds every copy to the recorded digest; with an
+the published door, vendored as-is at the version in `VENDOR.json`** — including the `store`
+option these templates depend on, which is upstream since 1.11.0 — and
 agent-entry checkout beside this repo (`../agent-entry`, or `$MURETAI_AGENT_ENTRY`) it also
 re-derives them from the recorded commit and says how far behind upstream the pin is.
 

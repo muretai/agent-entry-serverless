@@ -1,35 +1,33 @@
-# patches/
+# patches/ — retired
 
-`store-seam.patch` is the difference between the upstream `@muretai/agent-entry` module and
-the copy these templates vendor: the `store` option and the `then1` ladder that lets one
-verification path serve both in-memory state and an external store (Vercel KV / Upstash,
-Netlify Blobs, Workers KV).
+These templates used to vendor a PATCHED door. The patch, `store-seam.patch`, added the
+`store` option and the `then1` ladder that let a template keep its ledger, replay set and
+device pins in Cloudflare KV, Vercel KV or Netlify Blobs instead of per-instance memory —
+the three failures a serverless deployment otherwise walks into with no error.
 
-It is applied by `scripts/vendor.mjs` — never by hand, and never to one template copy:
+**The seam is upstream now.** `@muretai/agent-entry` 1.11.0 carries all ten of the patch's
+hunks: `store` is an option `createAgentEntry` accepts, and `then1`, `asStore` and
+`memoryStore` are the module's own. `patch --forward` against 1.11.1 answers
+"10 out of 10 hunks ignored — previously applied". A patch that adds nothing can only fail,
+and keeping it would pin these templates to the 1.10.0 door for good. It was removed on
+2026-09-08; the history holds it if it is ever wanted again.
 
+## Vendoring now
+
+```sh
+node scripts/vendor.mjs --ref v1.11.1        # ../agent-entry, or $MURETAI_AGENT_ENTRY
 ```
-node scripts/vendor.mjs --ref <tag|commit>       # reads ../agent-entry, or $MURETAI_AGENT_ENTRY
-node scripts/vendor.mjs --ref main --dry-run     # say what would change, write nothing
-```
 
-The script reads the door from the agent-entry checkout at that commit (`git show`, so that
-checkout's working tree does not matter), applies this patch with `patch --forward` in a temp
-dir, writes the result to the three template copies, records the commit, version, date and
-the sha256 of each copy in `VENDOR.json`, and runs `npm test`. If a hunk no longer applies,
-it writes nothing and prints patch's own output: rebase this file onto that upstream by hand,
-then re-run. `tests/check-vendor.mjs` re-derives the copies from the recorded commit whenever
-an agent-entry checkout is beside this repo, so the pin cannot name a base the copies were not
-built from.
+That reads the door out of agent-entry at the tag with `git show`, writes the three copies,
+and records the commit, the version and each file's sha256 in `VENDOR.json` at the repo root.
+`npm test` holds the copies to those digests with no agent-entry checkout present, and — only
+when one is beside this repo — checks that the recorded commit really produces those bytes.
 
-The upstream is the agent-entry repository — <https://github.com/muretai/agent-entry>, the
-door's home. The release tool that used to rebuild these copies from the other side and push
-them here is gone; the pull happens from this side, with the script above.
+The `--no-patch` flag is now the default path and the flag itself is redundant; it stays for
+the day a template again needs a difference from upstream. If that day comes, write the
+difference down as a patch here, and `scripts/vendor.mjs` will apply it.
 
-**History.** Written on 2026-08-29 against the door of the 1.10.0 release (agent-entry
-`f5d5aca`; the base was identified after the fact by reverse-applying this patch, and the
-checker's sibling leg proves it). Since agent-entry 1.11.0 (`551cd2c`, 2026-09-05) the
-upstream door carries the seam itself: nine of these ten hunks are in it byte for byte, and
-the tenth — the `store` paragraph in `createAgentEntry`'s option docs — is worded
-differently, so this patch neither applies to nor reverses out of 1.11.0 cleanly. The next
-re-vendor is therefore `--no-patch`, after checking the three adapters against upstream's
-store contract, and this file is retired with it.
+What still belongs to these templates, and is not upstream: each platform's store
+(`workers/src/store.mjs`, `vercel/lib/rest-kv-store.mjs`, `netlify/lib/blob-store.mjs`),
+which implements the five methods the door calls — `seenMessage`, `getAccount`, `putAccount`,
+`getDeviceOwner`, `putDeviceOwner`.

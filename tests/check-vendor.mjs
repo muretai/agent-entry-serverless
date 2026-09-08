@@ -3,7 +3,7 @@
  *
  * check-sync.mjs proves the copies are identical to EACH OTHER. This proves they are identical
  * to what scripts/vendor.mjs wrote: the door from agent-entry at one recorded commit, plus the
- * transform it records (patches/store-seam.patch). Two legs:
+ * transform it records, if any (there is none since 1.11.0 took the store seam upstream). Two legs:
  *
  *   pin       ALWAYS: VENDOR.json is well-formed, names all three copies, and every file it
  *             lists is on disk at the sha256 it records. Needs nothing outside this repository.

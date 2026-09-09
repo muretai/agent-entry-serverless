@@ -2,9 +2,9 @@
   "_": "Written by scripts/vendor.mjs; do not edit by hand. tests/check-vendor.mjs holds the three copies to these digests without any agent-entry checkout present, and re-derives them from this commit when one is beside this repository.",
   "from": "agent-entry",
   "repository": "https://github.com/muretai/agent-entry",
-  "ref": "v1.11.4",
-  "commit": "de87b687388ae83e7c4b37452358252a7751125f",
-  "version": "1.11.4",
+  "ref": "v1.11.5",
+  "commit": "c67f0ff22ce81df2af4fb5bfcdf6ab72efb1643a",
+  "version": "1.11.5",
   "date": "2026-09-09",
   "files": {
     "workers/src/muretai-agent-entry.mjs": {

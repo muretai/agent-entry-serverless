@@ -2194,8 +2194,52 @@ const OVERLOADED_RESPONSE = 'HTTP/1.1 503 Service Unavailable\r\n'
 
 /** The stdlib's STRICT UTF-8 decoder: it THROWS on an invalid byte instead of substituting
  *  U+FFFD, which is what `Buffer.toString('utf8')` does and what let a body neither
- *  implementation could agree about reach the ladder. Node global since v11 — no dependency. */
-const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+ *  implementation could agree about reach the ladder. Node global since v11 — no dependency.
+ *
+ *  `ignoreBOM: true` is the SECOND half, and the flag's name is inverted: it does not mean
+ *  "ignore a byte order mark", it means "do not STRIP one". Left at its default of false —
+ *  which is what this line said until now — the decoder silently REMOVES a leading U+FEFF, so
+ *  `EF BB BF {"jsonrpc":…}` reached `JSON.parse` with the mark already gone and was accepted.
+ *  With it true this decoder is byte-for-byte the twin of `shared/protocol.loads`'s
+ *  `raw.decode("utf-8")`, which also keeps the mark and also hands it to a parser that
+ *  refuses it. The seam's `UTF8_STRICT` (see `canonicalFromJSON`) got this in agent-seam
+ *  0.3.1; this boundary — the door's own JSON-RPC body — did not, and the two doors
+ *  disagreed about the same bytes for as long as that was true. */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * The JSON-RPC body as text, or a throw — the door's ONE byte-to-string boundary for a wire
+ * document a stranger sent. Refuses a leading byte order mark before decoding anything.
+ *
+ * WHY NOT `canonicalFromJSON`, WHICH ALREADY OWNS THIS. It is the right function for a
+ * document that is about to be SIGNED, and this one is not: it returns canonical bytes rather
+ * than a parsed value, and on the way there it refuses several things the JSON-RPC ladder must
+ * answer 200 for and that the Python door answers 200 for — an `id` of `10**400` (arrives as
+ * `Infinity`, which `canonicalJSON` refuses and `safeId` deliberately answers under `null`),
+ * an `id` carrying a lone surrogate escape (`assertEncodable` refuses it; `safeId` answers
+ * under `null`). Routing the body through it would turn four measured 200s into 400s and
+ * re-open the split this closes, one rung further down.
+ *
+ * SO THE RULE IS NOT WRITTEN TWICE: the five marks are read from `JSON_BOMS`, the seam's own
+ * table, declared beside `canonicalFromJSON` and shared with it. Only the scan is here, and it
+ * exists so the refusal is a RULE rather than a side effect of `JSON.parse` happening to treat
+ * U+FEFF as non-whitespace — an implicit guard is one a later edit removes with nothing going
+ * red. RFC 8259 §8.1: a JSON text sent between systems carries no byte order mark, and
+ * stripping one makes `EF BB BF {"a":1}` and `{"a":1}` — two distinct wire documents — the
+ * same document. The four non-UTF-8 marks are refused here too, though the fatal decoder below
+ * would refuse them anyway: `FF`/`FE` is not valid UTF-8, and neither is the `FE` inside
+ * `00 00 FE FF`. Python refuses all five the same way (`json.loads`: "Unexpected UTF-8 BOM"
+ * for `EF BB BF`, `UnicodeDecodeError` for the other four), so both doors answer one status.
+ */
+function jsonRpcBodyText(bytes) {
+  for (const bom of JSON_BOMS) {
+    if (bytes.length >= bom.length && bom.every((b, i) => bytes[i] === b)) {
+      throw new SyntaxError(
+        `json: document begins with a byte order mark (${Buffer.from(bom).toString('hex')})`);
+    }
+  }
+  return STRICT_UTF8.decode(bytes);
+}
 
 /**
  * The JSON-RPC `id` we may ECHO, or null.
@@ -3569,9 +3613,19 @@ export function createAgentEntry({
     // verified are not the bytes that arrived, which is precisely the thing a signature is
     // supposed to make impossible to be wrong about. `TextDecoder` with `fatal` is the
     // stdlib's strict decoder (global since Node 11); no dependency is added.
+    //
+    // A LEADING BYTE ORDER MARK IS REFUSED ON THE SAME RUNG, and it is the same class of
+    // defect one flag over: `ignoreBOM` defaults to false and false means STRIP, so
+    // `EF BB BF {"jsonrpc":…}` used to reach `JSON.parse` with the mark already gone and be
+    // accepted here while `shared/protocol.loads` raised and the Python door answered 400 —
+    // two doors, one set of bytes, two verdicts. `jsonRpcBodyText` throws instead, into this
+    // same catch, so a marked body is answered with the SAME 400 and the SAME body as any
+    // other unparseable one: which rung refused is not a fact a stranger gets told, and the
+    // Python door does not tell them either (one `{"error": "unparseable request body …"}`
+    // for the whole class).
     let req;
     try {
-      req = JSON.parse(STRICT_UTF8.decode(bodyBuffer));
+      req = JSON.parse(jsonRpcBodyText(bodyBuffer));
     } catch {
       return jsonResponse(400, { error: 'malformed JSON' });
     }

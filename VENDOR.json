@@ -2,22 +2,22 @@
   "_": "Written by scripts/vendor.mjs; do not edit by hand. tests/check-vendor.mjs holds the three copies to these digests without any agent-entry checkout present, and re-derives them from this commit when one is beside this repository.",
   "from": "agent-entry",
   "repository": "https://github.com/muretai/agent-entry",
-  "ref": "v1.11.5",
-  "commit": "c67f0ff22ce81df2af4fb5bfcdf6ab72efb1643a",
-  "version": "1.11.5",
+  "ref": "v1.11.6",
+  "commit": "a72d1e2781da9a557afd27c4e7a6ce657435726c",
+  "version": "1.11.6",
   "date": "2026-09-09",
   "files": {
     "workers/src/muretai-agent-entry.mjs": {
       "source": "muretai-agent-entry.mjs",
-      "sha256": "7a89f97b07da4a23748f94aea47ff9b4dc790c4870d2433751a6711ffe9b1a83"
+      "sha256": "82ddd2bfdea935d728b3490b2e69a5a07f60e95ac2a39fbe4ae2da40600495d7"
     },
     "vercel/lib/muretai-agent-entry.mjs": {
       "source": "muretai-agent-entry.mjs",
-      "sha256": "7a89f97b07da4a23748f94aea47ff9b4dc790c4870d2433751a6711ffe9b1a83"
+      "sha256": "82ddd2bfdea935d728b3490b2e69a5a07f60e95ac2a39fbe4ae2da40600495d7"
     },
     "netlify/lib/muretai-agent-entry.mjs": {
       "source": "muretai-agent-entry.mjs",
-      "sha256": "7a89f97b07da4a23748f94aea47ff9b4dc790c4870d2433751a6711ffe9b1a83"
+      "sha256": "82ddd2bfdea935d728b3490b2e69a5a07f60e95ac2a39fbe4ae2da40600495d7"
     }
   }
 }

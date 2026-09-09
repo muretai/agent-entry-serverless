@@ -817,11 +817,75 @@ export function signBytes(seedHex, message) {
   return nodeSign(null, m, ed25519PrivateKey(seedHex));
 }
 
+// The Ed25519 points of small order, in every canonical AND non-canonical 32-byte
+// spelling. `[h]A` is the identity for each of them, so `R = A, S = 0` satisfies
+// `[S]B == R + [h]A` over EVERY message: one constant blob authenticates anything, and
+// no private key exists or is needed. The identity point renders as a well-formed
+// `did:key`, so the codec cannot be the place this is caught.
+//
+// This list is the twin of `_ED25519_SMALL_ORDER` in python/shared/crypto.py and must
+// stay byte-identical to it. Fourteen entries: a strict RFC 8032 decoder yields eleven,
+// and the three extra non-canonical spellings (y = p, p+1) are carried because a decoder
+// that masks y to 255 bits accepts them as the same point.
+const ED25519_SMALL_ORDER = new Set([
+  // y = 0 (x = ±sqrt(-1)) — order 4
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  '0000000000000000000000000000000000000000000000000000000000000080',
+  // y = 1 (x = 0) — order 1: the IDENTITY, the element that signs everything
+  '0100000000000000000000000000000000000000000000000000000000000000',
+  '0100000000000000000000000000000000000000000000000000000000000080',
+  // order 8
+  '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+  '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85',
+  // order 8 (the other one)
+  'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+  'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa',
+  // y = p-1 (x = 0) — order 2
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+  // y = p, i.e. y == 0 — the NON-CANONICAL spelling of the order-4 point
+  'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+  // y = p+1, i.e. y == 1 — the NON-CANONICAL spelling of the IDENTITY
+  'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+]);
+
+// 2^255 - 19, as the little-endian y coordinate is compared against it.
+const ED25519_P = (1n << 255n) - 19n;
+
+function leToBigInt(buf) {
+  let n = 0n;
+  for (let i = buf.length - 1; i >= 0; i -= 1) n = (n << 8n) | BigInt(buf[i]);
+  return n;
+}
+
+/** The byte-level gate every Ed25519 verification here opens with — the twin of Python's
+ *  `_ed25519_wire_ok`, and the reason this file does not delegate point validity to the
+ *  host. It cannot: measured 2026-09-09, `node:crypto.verify` on the identity point with
+ *  `R = identity, S = 0` answers FALSE on Node 26.5.1 and TRUE on Node 22.23.2 — the same
+ *  bytes, the same reported OpenSSL 3.6.3, opposite verdicts. The package declares
+ *  `engines.node >= 20`, so on the floor it supports, the host is not a guard.
+ *
+ *  Four refusals, at the one place a public key ENTERS verification so every caller
+ *  inherits them: the key and the signature's R component are each refused if they are a
+ *  small-order encoding, and each refused if their y is not reduced below p (a decoder
+ *  that masks y to 255 bits would otherwise read two spellings as one point). */
+function ed25519WireOk(publicRaw, signature) {
+  if (ED25519_SMALL_ORDER.has(publicRaw.toString('hex'))) return false;
+  const r = signature.subarray(0, 32);
+  if (ED25519_SMALL_ORDER.has(r.toString('hex'))) return false;
+  const mask255 = (1n << 255n) - 1n;
+  return (leToBigInt(publicRaw) & mask255) < ED25519_P
+      && (leToBigInt(r) & mask255) < ED25519_P;
+}
+
 /** Verify a raw Ed25519 signature. Never throws — bad key/sig bytes answer false. */
 export function verifyBytes(publicRaw, signature, message) {
   try {
     if (!Buffer.isBuffer(publicRaw) || publicRaw.length !== 32) return false;
     if (!Buffer.isBuffer(signature) || signature.length !== 64) return false;
+    if (!ed25519WireOk(publicRaw, signature)) return false;
     if (!Buffer.isBuffer(message)) assertEncodable(String(message));   // same as signBytes
     const m = Buffer.isBuffer(message) ? message : Buffer.from(String(message), 'utf8');
     return nodeVerify(null, m, ed25519PublicKey(publicRaw), signature);
